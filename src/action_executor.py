@@ -95,6 +95,23 @@ def press_back():
     time.sleep(0.5)
 
 
+def press_home():
+    """Press the Android home button."""
+    adb("shell", "input", "keyevent", "3")
+    time.sleep(0.5)
+
+
+def unlock():
+    """Wake screen and dismiss keyguard."""
+    adb("shell", "input", "keyevent", "26")  # Power
+    time.sleep(0.3)
+    adb("shell", "wm", "dismiss-keyguard")
+    time.sleep(0.3)
+    # Swipe up to unlock
+    adb("shell", "input", "swipe", "630", "2300", "630", "300", "300")
+    time.sleep(1.0)
+
+
 def execute(nodes, action):
     """Dispatch a single action.
 

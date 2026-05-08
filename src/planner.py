@@ -88,10 +88,17 @@ def _build_ui_context(nodes, max_nodes=60):
 
 def _extract_text(content):
     """Pull the first text block from response content, skipping thinking blocks."""
+    texts = []
     for block in content:
         if hasattr(block, "text"):
-            return block.text.strip()
-    raise RuntimeError("No text block in response")
+            texts.append(block.text.strip())
+    if texts:
+        return "\n".join(texts)
+    # Fallback: try to get any string representation
+    raw = str(content)
+    if raw:
+        return raw
+    raise RuntimeError("No text in response")
 
 
 def plan(task, nodes):
