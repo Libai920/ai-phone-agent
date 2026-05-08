@@ -9,10 +9,7 @@ from anthropic import Anthropic
 
 
 # DeepSeek endpoint via Anthropic SDK
-API_KEY = os.environ.get(
-    "ANTHROPIC_AUTH_TOKEN",
-    "sk-93dd731b07ba47cd9db1ff280e07c737",
-)
+API_KEY = os.environ["ANTHROPIC_AUTH_TOKEN"]
 BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
 MODEL = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-pro")
 

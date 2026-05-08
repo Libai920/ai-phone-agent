@@ -63,3 +63,43 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## Project: AI Phone Agent
+
+- **Repo:** https://github.com/Libai920/ai-phone-agent
+- **Local:** E:\ai-phone-agent
+- **Goal:** AI controls Android phone via ADB + DeepSeek
+
+### Architecture
+
+```
+src/ui_reader.py       → adb uiautomator dump → filtered JSON
+src/action_executor.py → JSON → adb input tap/swipe/text
+src/planner.py         → DeepSeek API (Anthropic-compat) → plan + actions
+src/agent.py           → orchestrator: read→plan→execute→verify→replan
+```
+
+### Key decisions (from grilled session)
+- Android only (ADB, no iOS)
+- Structured UI tree (no screenshots)
+- DeepSeek v4 via Anthropic-compatible API
+- Plan-first architecture with re-planning on assert failure
+- Python + ADB proxy (no Android APK needed)
+- ADB path: `E:/AA/platform-tools/adb.exe`
+- Must use `//sdcard/` prefix for MSYS compatibility
+
+### Running
+```bash
+python src/agent.py "打开知乎"
+```
+
+### Device
+- vivo phone, serial 10AFBC22FT008G3
+- ADB at E:/AA/platform-tools/adb.exe
+- Common issue: phone locks after idle → agent auto-unlocks
+
+### GitHub
+- Token stored in environment/session
+- gh CLI at: E:/tools/bin/gh.exe
