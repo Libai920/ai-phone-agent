@@ -25,53 +25,58 @@ def _get_client():
 
 SYSTEM_PROMPT = """You are an AI that controls an Android phone. You receive the current UI state (a list of interactive elements) and a user's task. You must produce a structured plan and the next action to take.
 
-## Output format
+## CRITICAL: Output format
 
-Always respond with valid JSON only, no other text:
+You MUST respond with ONLY this exact JSON structure — no other text, no markdown fences, no explanations:
 
-```json
-{
-  "plan": [
-    {"step": 1, "description": "...", "expected_page": "..."},
-    {"step": 2, "description": "...", "expected_page": "..."}
-  ],
-  "next_action": {
-    "action": "click",
-    "target": {"text": "微信"},
-    "assert": {"text_contains": "通讯录"}
-  }
-}
-```
+{"plan":[{"step":1,"description":"...","expected_page":"..."}],"next_action":{"action":"click","target":{"text":"微信"},"assert":{"text_contains":"通讯录"}}}
+
+The response must be a single JSON object with two keys: "plan" (array of step objects) and "next_action" (a single action object). NEVER output a bare action like {"action":"tap"} — always wrap it in the full structure.
 
 ## Action types
 
-- **click**: Tap a UI element. Target by text (exact or substring), resource_id, or content_desc.
-- **input**: Type text into the currently focused field. Use `{"action": "input", "text": "hello"}`.
-- **swipe**: Scroll the screen. Use `{"action": "swipe", "direction": "up"}` (up/down/left/right).
-- **back**: Press the Android back button. Use `{"action": "back"}`.
+- click: Tap a UI element by text or content_desc. Example: {"action":"click","target":{"text":"微信"},"assert":{"page_changed":true}}
+- input: Type text. Input does NOT change pages — always use text_contains (NOT page_changed). Example: {"action":"input","text":"牛鸡","assert":{"text_contains":"牛鸡"}}
+- swipe: Scroll. Example: {"action":"swipe","direction":"up","assert":{"page_changed":true}}
+- back: Press back. Example: {"action":"back","assert":{"page_changed":true}}
+- launch: Start an app. ALWAYS use this to open apps instead of hunting for icons on the home screen. You can provide either "package" (if known) or "app" (the app name in Chinese/English, the system will resolve it). Examples: {"action":"launch","app":"QQ","assert":{"page_changed":true}} or {"action":"launch","package":"com.tencent.mobileqq","assert":{"page_changed":true}}
 
 ## Assert
 
-Every next_action must include an assert field. Assert describes what should be visible on screen after the action succeeds. This is how the system verifies the action worked. Use:
-- `text_contains`: text that should appear after the action
-- `page_changed`: true if the screen should be different after the action
-
-If assert fails, the system will send you the new UI state and you must revise the plan.
+Every next_action MUST include an assert field. Use:
+- text_contains: text expected to appear after action (REQUIRED for input actions)
+- page_changed: true if screen should change (do NOT use for input — typing does not change pages)
 
 ## Rules
 
-1. Generate a plan first, then the first action. The plan describes every step needed to complete the task.
-2. Use the user's prior knowledge of the app — you know how common apps work.
-3. Match targets to actual elements in the UI tree. Use exact text from the UI tree.
-4. If no matching element exists for your target, return a plan-revision with alternative targets.
-5. Keep plans concise but complete. Do not skip verification steps.
+1. Always output the full {"plan":[...],"next_action":{...}} structure — never a bare action
+2. To OPEN an app, use launch with the package name (infer from resource_id). NEVER swipe around the home screen looking for icons
+3. Match targets to EXACT text or content_desc from the UI element list provided
+4. NEVER invent resource IDs — only use resource_id values that actually appear in the UI list
+5. If no matching UI element exists, use a bounds target with approximate coordinates
+6. Keep plans minimal — only the steps actually needed
 """
 
 
-def _build_ui_context(nodes, max_nodes=60):
-    """Turn node list into a compact text representation for the LLM."""
+def _build_ui_context(nodes, max_nodes=100):
+    """Turn node list into a compact text representation for the LLM.
+
+    Always includes top 70% and bottom 30% of nodes — the bottom typically
+    contains input fields, send buttons, and navigation that get truncated
+    if we just take the first max_nodes.
+    """
+    total = len(nodes)
+    if total <= max_nodes:
+        selected = nodes
+    else:
+        top_n = int(max_nodes * 0.7)
+        bottom_n = max_nodes - top_n
+        selected = list(nodes[:top_n])
+        if bottom_n > 0:
+            selected.extend(nodes[-bottom_n:])
+
     lines = []
-    for i, n in enumerate(nodes[:max_nodes]):
+    for i, n in enumerate(selected):
         label = n["text"] or n["content_desc"] or n["resource_id"].split("/")[-1] or n["class"].split(".")[-1]
         rid = n["resource_id"] if n["resource_id"] else ""
         lines.append(
@@ -84,18 +89,88 @@ def _build_ui_context(nodes, max_nodes=60):
 
 
 def _extract_text(content):
-    """Pull the first text block from response content, skipping thinking blocks."""
+    """Pull text blocks from response content, skipping thinking blocks."""
     texts = []
     for block in content:
-        if hasattr(block, "text"):
-            texts.append(block.text.strip())
+        t = getattr(block, "text", None)
+        if t:
+            texts.append(t.strip())
     if texts:
         return "\n".join(texts)
-    # Fallback: try to get any string representation
-    raw = str(content)
-    if raw:
-        return raw
-    raise RuntimeError("No text in response")
+    # If only thinking blocks, strip them and look for JSON
+    thinking_texts = []
+    for block in content:
+        t = getattr(block, "thinking", None)
+        if t:
+            thinking_texts.append(t.strip())
+    if thinking_texts:
+        # DeepSeek sometimes wraps the real output inside thinking
+        combined = "\n".join(thinking_texts)
+        # Try to find JSON inside the thinking block
+        return combined
+    raise RuntimeError(f"No text or thinking in response: {str(content)[:200]}")
+
+
+def _parse_json(text):
+    """Robust JSON extraction from LLM response.
+
+    Handles: markdown fences, leading/trailing junk, thinking blocks,
+    bare actions without plan wrapper.
+    """
+    t = text.strip()
+
+    # Strip markdown code fences of any flavor
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1]
+        if t.endswith("```"):
+            t = t.rsplit("```", 1)[0]
+
+    # Try direct parse first
+    try:
+        result = json.loads(t)
+    except json.JSONDecodeError:
+        # Try to find JSON object in the text
+        brace_start = t.find("{")
+        result = None
+        if brace_start >= 0:
+            depth = 0
+            in_string = False
+            escape = False
+            for i, ch in enumerate(t[brace_start:], brace_start):
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = t[brace_start : i + 1]
+                        try:
+                            result = json.loads(candidate)
+                        except json.JSONDecodeError:
+                            pass
+                        break
+
+    if result is None:
+        raise RuntimeError(f"Failed to parse JSON from response:\n{text[:500]}")
+
+    # If DeepSeek returned a bare action, wrap it
+    if "action" in result and "plan" not in result:
+        result = {
+            "plan": [{"step": 1, "description": f"Do: {result.get('action', '?')}", "expected_page": "?"}],
+            "next_action": result,
+        }
+
+    return result
 
 
 def plan(task, nodes):
@@ -109,15 +184,13 @@ def plan(task, nodes):
     client = _get_client()
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
 
     text = _extract_text(resp.content)
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0]
-    return json.loads(text)
+    return _parse_json(text)
 
 
 def next_step(task, plan_text, last_assert_result, nodes):
@@ -136,15 +209,13 @@ def next_step(task, plan_text, last_assert_result, nodes):
     client = _get_client()
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_msg}],
     )
 
     text = _extract_text(resp.content)
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1].rsplit("```", 1)[0]
-    return json.loads(text)
+    return _parse_json(text)
 
 
 if __name__ == "__main__":
