@@ -218,6 +218,121 @@ def next_step(task, plan_text, last_assert_result, nodes):
     return _parse_json(text)
 
 
+SCREENSHOT_PROMPT = """You are an AI that controls an Android phone via screenshots. You receive a screenshot of the current screen and a user's task. You must produce a structured plan and the next action to take.
+
+## Output format
+
+You MUST respond with ONLY this exact JSON structure — no other text, no markdown fences, no explanations:
+
+{"plan":[{"step":1,"description":"...","expected_page":"..."}],"next_action":{"action":"click","target":{"bounds":"[x1,y1][x2,y2]"},"assert":{"page_changed":true}}}
+
+## Action types
+
+- click: Tap a UI element by its bounds coordinates. Example: {"action":"click","target":{"bounds":"[100,200][300,350]"},"assert":{"page_changed":true}}
+- input: Type text. Example: {"action":"input","text":"你好","assert":{"text_contains":"你好"}}
+- swipe: Scroll. Example: {"action":"swipe","direction":"up","assert":{"page_changed":true}}
+- back: Press back. Example: {"action":"back","assert":{"page_changed":true}}
+- launch: Start an app. Example: {"action":"launch","app":"微信","assert":{"page_changed":true}}
+
+## Coordinate system
+
+The screenshot resolution is the actual screen resolution. Use pixel coordinates directly from what you see in the image. Estimate the center of the target element and provide bounds as "[x1,y1][x2,y2]".
+
+## Task patterns
+
+For "send X to Y" (send a message to a contact/group):
+1. If WeChat/QQ is already open and the contact is NOT visible in the chat list → click the search icon (usually a magnifying glass at the top, around y=100-200) → input the contact name → click the search result
+2. If the contact IS visible in the chat list → click it directly
+3. Once in the chat: click the input field (usually near the bottom, around y=2400-2600) → use input action to type the message → click the send button (usually near the input field, right side)
+4. Always include BOTH the input step AND the send step — don't stop after typing
+
+For "search X" or finding anything not on the current screen:
+1. Look for a search bar or magnifying glass icon at the top of the screen
+2. Click it → input the query → click the relevant result
+
+## Rules
+
+1. Always output the full {"plan":[...],"next_action":{...}} structure
+2. To OPEN an app, use launch with the app name — NEVER swipe around looking for icons
+3. Provide precise bounds coordinates based on what you SEE in the screenshot
+4. Keep plans minimal — only the steps actually needed
+5. Look at the screenshot carefully before deciding the next action
+6. ALWAYS use the search/magnifying glass to find contacts instead of scrolling through a long chat list
+7. For send tasks: the final steps MUST include input (type the message) followed by clicking the send button
+"""
+
+
+def plan_with_screenshot(task, b64_data):
+    """Generate a plan from a screenshot image.
+
+    Returns: {"plan": [...], "next_action": {...}}
+    """
+    client = _get_client()
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=SCREENSHOT_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64_data,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": f"Task: {task}\n\nLook at this screenshot and decide the next action.",
+                },
+            ],
+        }],
+    )
+
+    text = _extract_text(resp.content)
+    return _parse_json(text)
+
+
+def next_step_with_screenshot(task, plan_text, last_assert_result, b64_data):
+    """Get the next action from a screenshot, given the plan and current state.
+
+    Returns: {"next_action": {...}} or {"plan_revision": {...}}
+    """
+    client = _get_client()
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=4096,
+        system=SCREENSHOT_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64_data,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Task: {task}\n\n"
+                        f"Plan so far:\n{plan_text}\n\n"
+                        f"Last assert result: {last_assert_result}\n\n"
+                        f"Look at this screenshot and decide the next action."
+                    ),
+                },
+            ],
+        }],
+    )
+
+    text = _extract_text(resp.content)
+    return _parse_json(text)
+
+
 if __name__ == "__main__":
     from ui_reader import get_ui_state
 

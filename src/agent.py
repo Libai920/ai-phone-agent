@@ -5,67 +5,51 @@ import time
 import sys
 
 from ui_reader import get_ui_state
-from action_executor import execute, unlock, press_home
-from planner import plan, next_step
+from action_executor import execute, enable_u2_ime, restore_ime, ensure_unlocked, check_assert, screencap
+from planner import plan, next_step, plan_with_screenshot, next_step_with_screenshot
+from fast_agent import fast_run
 
 MAX_ITERATIONS = 12
 SAME_TARGET_RETRIES = 2
-SLEEP_AFTER_ACTION = 1.2
-LOCK_THRESHOLD = 5  # nodes <= this means probably locked
-
-
-def _ensure_unlocked():
-    """Check if phone is awake and unlocked. Fix it if not."""
-    nodes = get_ui_state()
-    if len(nodes) <= LOCK_THRESHOLD:
-        print(f"  [!] Phone appears locked ({len(nodes)} nodes), waking...")
-        unlock()
-        time.sleep(1.0)
-        nodes = get_ui_state()
-        print(f"  [!] After unlock: {len(nodes)} nodes")
-    return nodes
-
-
-def check_assert(nodes_before, nodes_after, action_spec):
-    """Simple assert check. Returns (ok, message)."""
-    assertion = action_spec.get("assert", {})
-
-    expected = assertion.get("text_contains", "")
-    if expected:
-        for n in nodes_after:
-            if expected.lower() in (n["text"] + n["content_desc"]).lower():
-                return True, f"Found '{expected}' on screen"
-
-    if assertion.get("page_changed"):
-        before_ids = {n.get("text") + n.get("content_desc") + n.get("resource_id") for n in nodes_before}
-        after_ids = {n.get("text") + n.get("content_desc") + n.get("resource_id") for n in nodes_after}
-        if before_ids != after_ids:
-            return True, "Page changed"
-        else:
-            return False, "Page did not change"
-
-    return True, "No assertion to check"
-
-
+SLEEP_AFTER_ACTION = 0.5
 def _print_plan(plan_list):
     for s in plan_list:
         print(f"    {s['step']}. {s['description']} → {s.get('expected_page', '?')}")
 
 
 def run(task):
-    """Execute a multi-step task with re-planning on failure.
+    """Execute a task. Fast path for simple ops, LLM for complex ones.
 
     Returns True on success.
     """
+    # Fast path: no LLM, rule-based execution
+    if fast_run(task):
+        return True
+
+    # Slow path: LLM planning + execution
+    try:
+        return _run(task)
+    finally:
+        restore_ime()
+
+
+def _run(task):
+    """Inner run — IME is managed by outer run()."""
     print(f"\n{'='*50}")
     print(f"Task: {task}")
     print(f"{'='*50}")
 
-    # Phase 0: ensure unlocked
-    nodes = _ensure_unlocked()
+    # Phase 0: ensure unlocked, enable fast IME
+    nodes = ensure_unlocked()
+    enable_u2_ime()
 
-    # Phase 1: initial plan
+    # Phase 1: initial plan — use screenshots if UI tree is too sparse
     print(f"\n[1] Reading screen: {len(nodes)} nodes")
+    use_screenshots = len(nodes) < 5
+
+    if use_screenshots:
+        print("[2] UI tree sparse, switching to screenshot mode...")
+        return _run_with_screenshots(task)
 
     print("[2] Planning with DeepSeek...")
     try:
@@ -76,7 +60,6 @@ def run(task):
             print(f"  PLAN FAIL: empty response — {json.dumps(result, ensure_ascii=False)[:200]}")
             return False
         if not action:
-            # Maybe the task is already done? Just pick first plan step
             print(f"  WARNING: no next_action, using plan only")
             action = {}
     except Exception as e:
@@ -103,7 +86,7 @@ def run(task):
         print(f"  Goal: {step_desc}")
 
         # Ensure still unlocked before acting
-        nodes_before = _ensure_unlocked()
+        nodes_before = ensure_unlocked()
 
         # Execute
         if not action or "action" not in action:
@@ -134,7 +117,7 @@ def run(task):
 
             history.append({"step": plan_idx, "action": action, "result": f"exec_fail: {e}"})
             # Re-plan
-            nodes = _ensure_unlocked()
+            nodes = ensure_unlocked()
             hint = ""
             if same_target_fails > SAME_TARGET_RETRIES:
                 hint = " (Previous attempts with the same target failed — try a completely different approach, use text/desc from the ACTUAL UI tree, NOT made-up resource IDs)"
@@ -214,6 +197,118 @@ def run(task):
                 print("  No revised action, giving up.")
                 return False
             nodes = nodes_after
+
+    print(f"\n  Max iterations ({MAX_ITERATIONS}) reached.")
+    return False
+
+
+def _run_with_screenshots(task):
+    """Slow path using screenshots instead of UI tree (for apps that hide accessibility)."""
+    print(f"\n{'='*50}")
+    print(f"Task: {task}  [SCREENSHOT MODE]")
+    print(f"{'='*50}")
+
+    # Take initial screenshot
+    b64, w, h = screencap()
+    if not b64:
+        print("  SCREENSHOT FAILED")
+        return False
+    print(f"  Screenshot: {w}x{h}")
+
+    print("[1] Planning with screenshot...")
+    try:
+        result = plan_with_screenshot(task, b64)
+        plan_steps = result.get("plan", [])
+        action = result.get("next_action", {})
+        if not action:
+            print(f"  PLAN FAIL: no next_action")
+            return False
+    except Exception as e:
+        print(f"  PLAN FAIL: {e}")
+        return False
+
+    print(f"  Plan ({len(plan_steps)} steps):")
+    _print_plan(plan_steps)
+    print(f"  First action: {action.get('action')} target={action.get('target')}")
+
+    plan_idx = 0
+    iteration = 0
+
+    while iteration < MAX_ITERATIONS:
+        iteration += 1
+        current_step = plan_steps[plan_idx] if plan_idx < len(plan_steps) else None
+        step_desc = current_step.get("description", "?") if current_step else "?"
+
+        print(f"\n--- Step {plan_idx+1}/{len(plan_steps)} (iter {iteration}) ---")
+        print(f"  Goal: {step_desc}")
+
+        nodes_before = ensure_unlocked()
+
+        if not action or "action" not in action:
+            print(f"  No valid action, skipping")
+            break
+
+        act_label = action.get('action')
+        if act_label == 'input':
+            print(f"  Action: input '{action.get('text', '')}'")
+        elif act_label == 'launch':
+            pkg = action.get('package', '') or action.get('app', '?')
+            print(f"  Action: launch {pkg}")
+        else:
+            print(f"  Action: {act_label} {action.get('target', '')}")
+
+        try:
+            execute(nodes_before, action)
+        except RuntimeError as e:
+            print(f"  EXEC FAIL: {e}")
+            history_text = json.dumps(plan_steps, ensure_ascii=False)
+            b64, _, _ = screencap()
+            if not b64:
+                return False
+            try:
+                result = next_step_with_screenshot(task, history_text, f"FAIL: {e}", b64)
+                plan_steps = result.get("plan_revision", result.get("plan", plan_steps))
+                action = result.get("next_action", {})
+            except Exception as re:
+                print(f"  RE-PLAN FAIL: {re}")
+                return False
+            plan_idx = 0
+            if not action:
+                return False
+            continue
+
+        time.sleep(SLEEP_AFTER_ACTION)
+
+        # Take new screenshot for verification
+        b64, _, _ = screencap()
+        if not b64:
+            return False
+
+        # For screenshot mode, verify by asking the LLM (lightweight)
+        # For now, just trust the action succeeded
+        print(f"  Verify: (screenshot mode — trusting action)")
+
+        history_text = json.dumps(plan_steps, ensure_ascii=False)
+        plan_idx += 1
+        nodes = ensure_unlocked()
+
+        if plan_idx >= len(plan_steps):
+            print(f"\n{'='*50}")
+            print(f"ALL STEPS COMPLETE ({len(plan_steps)} steps, {iteration} iterations)")
+            print(f"{'='*50}")
+            return True
+
+        # Get next action
+        print(f"\n  → Advancing to step {plan_idx+1}: {plan_steps[plan_idx].get('description', '?')}")
+        try:
+            result = next_step_with_screenshot(task, history_text, "OK", b64)
+            action = result.get("next_action", {})
+        except Exception as e:
+            print(f"  NEXT_STEP FAIL: {e}")
+            return False
+        if not action:
+            print("  No next_action, assuming plan complete.")
+            return True
 
     print(f"\n  Max iterations ({MAX_ITERATIONS}) reached.")
     return False
