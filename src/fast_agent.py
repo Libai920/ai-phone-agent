@@ -226,6 +226,21 @@ def _find_and_click(nodes, text, fuzzy=True):
     return True
 
 
+def _looks_like_search_entry(node):
+    rid = node.get("resource_id", "").lower()
+    cls = node.get("class", "").lower()
+    desc = node.get("content_desc", "").lower()
+    text = node.get("text", "").lower()
+    return (
+        "search" in rid or
+        "search" in desc or
+        "搜索" in text or
+        "搜索" in desc or
+        "input" in rid or
+        "edit" in cls
+    )
+
+
 def fast_open(intent):
     """Open an app by name."""
     app = intent["app"]
@@ -268,9 +283,7 @@ def fast_send(intent, nodes):
         if not _find_and_click(current_nodes, target):
             found_search = False
             for n in current_nodes:
-                rid = n.get("resource_id", "").lower()
-                cls = n.get("class", "").lower()
-                if "search" in rid or "input" in rid or "edit" in cls:
+                if _looks_like_search_entry(n):
                     if n.get("clickable") or n.get("focusable"):
                         execute(current_nodes, {"action": "click", "target": {
                             "text": n.get("text", ""),
@@ -339,10 +352,7 @@ def fast_search(intent, nodes):
 
     # Find search bar
     for n in current_nodes:
-        rid = n.get("resource_id", "").lower()
-        cls = n.get("class", "").split(".")[-1].lower()
-        desc = n.get("content_desc", "").lower()
-        if "search" in rid or "search" in desc or "input" in rid or "edit" in cls:
+        if _looks_like_search_entry(n):
             if n.get("clickable") or n.get("focusable"):
                 execute(current_nodes, {"action": "click", "target": {
                     "text": n.get("text", ""),
