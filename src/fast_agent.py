@@ -46,6 +46,67 @@ _OPEN_RE = re.compile(r"打开(?P<app>.+)")
 
 # Pattern: "返回" / "退出"
 _BACK_RE = re.compile(r"^(返回|退出|back)$")
+# Pattern: "截图" / "截屏" / "保存截图"
+_SCREENSHOT_RE = re.compile(r"^(截图|截屏|保存截图|拍个照|screen(?:shot)?|capture)$")
+
+# ── research intent patterns ────────────────────────────────────
+
+# "在B站搜大模型教程" / "在美团搜猪脚饭"
+_RESEARCH_IN_APP_RE = re.compile(
+    r"在(?P<app>.+?)(?:里|中|上)?(?:搜索|搜|找|查找)(?P<query>.+)"
+)
+# "帮我在B站搜X" / "帮我在美团找X" (explicit "在" before app)
+_RESEARCH_HELP_IN_APP_RE = re.compile(
+    r"(?:帮我|给我|帮忙)在(?P<app>.+?)(?:里|中|上)?(?:搜索|搜|找|查找)(?P<query>.+)"
+)
+# "帮我找猪脚饭" / "帮我搜好吃的" / "给我推荐火锅" (no app specified)
+_RESEARCH_HELP_NO_APP_RE = re.compile(
+    r"(?:帮我|给我|帮忙)(?:找|搜索|搜|推荐)(?P<query>.+)"
+)
+# "推荐X" / "有什么好的X"
+_RESEARCH_RECOMMEND_RE = re.compile(
+    r"(?:推荐|有什么好的|有什么好)(?P<query>.+)"
+)
+# "搜一下B站大模型教程" — app between verb and query, only if app is a known name
+_RESEARCH_SIMPLE_RE = re.compile(
+    r"(?:搜索|搜|找)(?:一下|一搜)?(?P<rest>.+)"
+)
+
+# Read/describe patterns
+_READ_RE = re.compile(
+    r"(?:看看(?:这个|一下)?(?:页面|屏幕|手机)?"
+    r"|帮我看看(?:这个)?(?:页面|屏幕|手机)?"
+    r"|(?:总结|概括|归纳)一下(?:这个)?(?:页面|内容|屏幕)?"
+    r"|(?:上[面边]|页面[里上]?|屏幕[里上]?|这里)(?:写了?|讲了?|显示了?)(?:什么|啥)"
+    r"|(?:读|念|描述|介绍)(?:一下|一[下遍])(?:这个)?(?:页面|内容|屏幕)?"
+    r"|这是什么(?:页面|屏幕)?|讲了什么|写了什么|有什么内容"
+    r"|(?:描述|介绍)(?:一下)?(?:这个)?(?:屏幕|页面|内容))"
+)
+
+# ── pick result intent ──────────────────────────────────────────
+
+# "点第1个" / "打开第2个" / "第3个"
+_PICK_NTH_RE = re.compile(
+    r"(?:点|打开|选|点击)(?:第)?(?P<n>\d+)(?:个|号|项)"
+)
+# Bare "1" / "第1个"
+_PICK_NTH_BARE_RE = re.compile(
+    r"^第?(?P<n>\d+)(?:个|号|项)?$"
+)
+
+# Scroll patterns
+_SCROLL_COUNT_RE = re.compile(
+    r"(?:往[下上]滑?|翻|滚|滑)(?P<n>[0-9]+)(?:下|页|次|遍)"
+)
+_SCROLL_TO_END_RE = re.compile(
+    r"(?:滑|翻|滚)到底|滑到最[下底]|翻到最[下底]"
+)
+_SCROLL_UP_RE = re.compile(
+    r"^(?:往[上前]滑|上滑|往上翻|上一页|翻上去|向上滑|往上|滚上去)$"
+)
+_SCROLL_DOWN_RE = re.compile(
+    r"^(?:往[下后]滑|下滑|往下翻|滚动|下一页|翻[页下]|向下滑|滑下去)$"
+)
 
 
 def _get_foreground_package():
@@ -73,9 +134,34 @@ def parse_intent(task):
     """
     task = task.strip()
 
+    # 0. Pick from last research results
+    m = _PICK_NTH_RE.search(task)
+    if not m:
+        m = _PICK_NTH_BARE_RE.match(task)
+    if m:
+        n = int(m.group("n"))
+        if 1 <= n <= 10:
+            return {"type": "pick_nth", "n": n}
+
+    # 1. Specific single-action intents
     m = _BACK_RE.match(task)
     if m:
         return {"type": "back"}
+
+    m = _SCREENSHOT_RE.match(task)
+    if m:
+        return {"type": "screenshot"}
+
+    # 1a. Scroll intents
+    m = _SCROLL_COUNT_RE.search(task)
+    if m:
+        return {"type": "scroll", "direction": "up" if "下" in task else "down",
+                "count": int(m.group("n"))}
+    for pattern, direction, count in [(_SCROLL_TO_END_RE, "up", 8),
+                                        (_SCROLL_DOWN_RE, "up", 1),
+                                        (_SCROLL_UP_RE, "down", 1)]:
+        if pattern.match(task):
+            return {"type": "scroll", "direction": direction, "count": count}
 
     m = _OPEN_AND_SEND_RE.match(task)
     if m:
@@ -87,15 +173,56 @@ def parse_intent(task):
     if m:
         return {"type": "open", "app": m.group("app").strip()}
 
-    m = _SEARCH_IN_APP_RE.match(task)
+    # 2. Research intents — explicit app in query
+    m = _RESEARCH_IN_APP_RE.match(task)
     if m:
-        return {"type": "search", "app": m.group("app").strip(),
+        return {"type": "research", "app": m.group("app").strip(),
                 "query": m.group("query").strip()}
 
+    m = _RESEARCH_HELP_IN_APP_RE.match(task)
+    if m:
+        return {"type": "research", "app": m.group("app").strip(),
+                "query": m.group("query").strip()}
+
+    # 3. Search with app in old format — short queries stay as search, long → research
+    m = _SEARCH_IN_APP_RE.match(task)
+    if m:
+        query = m.group("query").strip()
+        app = m.group("app").strip()
+        if len(query) >= 3:
+            return {"type": "research", "app": app, "query": query}
+        return {"type": "search", "app": app, "query": query}
+
+    m = _RESEARCH_HELP_NO_APP_RE.match(task)
+    if m:
+        return {"type": "research", "query": m.group("query").strip()}
+
+    m = _RESEARCH_RECOMMEND_RE.match(task)
+    if m:
+        return {"type": "research", "query": m.group("query").strip()}
+
+    m = _RESEARCH_SIMPLE_RE.match(task)
+    if m:
+        rest = m.group("rest").strip()
+        for name in sorted(_KNOWN_APP_NAMES, key=len, reverse=True):
+            if rest.startswith(name) and len(rest) > len(name):
+                return {"type": "research", "app": name,
+                        "query": rest[len(name):].strip()}
+        return {"type": "research", "query": rest}
+
+    # 4. Simple search (short queries only)
     m = _SEARCH_RE.match(task)
     if m:
-        return {"type": "search", "query": m.group("query").strip()}
+        query = m.group("query").strip()
+        if len(query) >= 4:
+            return {"type": "research", "query": query}
+        return {"type": "search", "query": query}
 
+    # 4a. Read/describe intent
+    if _READ_RE.match(task):
+        return {"type": "read", "task": task}
+
+    # 5. Send/message intents
     m = _SEND_IN_APP_WITH_TARGET_RE.match(task)
     if m:
         return {"type": "send", "app": m.group("app").strip(),
@@ -145,6 +272,38 @@ def _find_and_click(nodes, text, fuzzy=True):
     return True
 
 
+def _looks_like_search_entry(node):
+    rid = node.get("resource_id", "").lower()
+    cls = node.get("class", "").lower()
+    desc = node.get("content_desc", "").lower()
+    text = node.get("text", "").lower()
+    return (
+        "search" in rid or
+        "search" in desc or
+        "搜索" in text or
+        "搜索" in desc or
+        "input" in rid or
+        "edit" in cls
+    )
+
+
+def _screen_contains_text(nodes, text):
+    if not text:
+        return True
+    lower = text.lower()
+    for n in nodes:
+        haystack = (n.get("text", "") + n.get("content_desc", "")).lower()
+        if lower in haystack:
+            return True
+    return False
+
+
+def _search_text_for_target(app, target):
+    if app == "微信" and target == "文件传输助手":
+        return "wenjianchuanshuzhushou"
+    return target
+
+
 def fast_open(intent):
     """Open an app by name."""
     app = intent["app"]
@@ -161,7 +320,7 @@ def fast_open(intent):
     return False
 
 
-_KNOWN_APP_NAMES = ["微信", "QQ", "支付宝", "抖音", "淘宝", "微博", "知乎", "小红书", "拼多多", "京东", "饿了么", "美团"]
+_KNOWN_APP_NAMES = ["微信", "QQ", "支付宝", "抖音", "淘宝", "微博", "知乎", "小红书", "拼多多", "京东", "饿了么", "美团", "B站", "哔哩哔哩", "bilibili", "快手", "高德地图", "高德", "百度地图", "百度", "酷狗音乐", "酷狗", "网易云音乐", "钉钉", "闲鱼", "得物"]
 
 
 def fast_send(intent, nodes):
@@ -185,17 +344,16 @@ def fast_send(intent, nodes):
     # Step 1: find and click the target (group/contact), if specified
     if target:
         if not _find_and_click(current_nodes, target):
+            search_text = _search_text_for_target(app, target)
             found_search = False
             for n in current_nodes:
-                rid = n.get("resource_id", "").lower()
-                cls = n.get("class", "").lower()
-                if "search" in rid or "input" in rid or "edit" in cls:
+                if _looks_like_search_entry(n):
                     if n.get("clickable") or n.get("focusable"):
                         execute(current_nodes, {"action": "click", "target": {
                             "text": n.get("text", ""),
                             "resource_id": n.get("resource_id", "")}})
                         time.sleep(0.5)
-                        execute(current_nodes, {"action": "input", "text": target})
+                        execute(current_nodes, {"action": "input", "text": search_text})
                         time.sleep(0.5)
                         time.sleep(SLEEP)
                         current_nodes = get_ui_state()
@@ -234,6 +392,11 @@ def fast_send(intent, nodes):
             if st in n.get("text", "") or st in n.get("content_desc", ""):
                 execute(current_nodes, {"action": "click", "target": {"text": n.get("text", "")}})
                 time.sleep(SLEEP)
+                after_send_nodes = get_ui_state()
+                if _screen_contains_text(after_send_nodes, text):
+                    print(f"  Verified sent text on screen: {text}")
+                else:
+                    print(f"  WARNING: sent text not visible after send: {text}")
                 return True
 
     for n in current_nodes:
@@ -242,6 +405,11 @@ def fast_send(intent, nodes):
             execute(current_nodes, {"action": "click", "target": {
                 "resource_id": n.get("resource_id", "")}})
             time.sleep(SLEEP)
+            after_send_nodes = get_ui_state()
+            if _screen_contains_text(after_send_nodes, text):
+                print(f"  Verified sent text on screen: {text}")
+            else:
+                print(f"  WARNING: sent text not visible after send: {text}")
             return True
 
     return False
@@ -258,10 +426,7 @@ def fast_search(intent, nodes):
 
     # Find search bar
     for n in current_nodes:
-        rid = n.get("resource_id", "").lower()
-        cls = n.get("class", "").split(".")[-1].lower()
-        desc = n.get("content_desc", "").lower()
-        if "search" in rid or "search" in desc or "input" in rid or "edit" in cls:
+        if _looks_like_search_entry(n):
             if n.get("clickable") or n.get("focusable"):
                 execute(current_nodes, {"action": "click", "target": {
                     "text": n.get("text", ""),
@@ -289,6 +454,17 @@ def fast_search(intent, nodes):
 def fast_back():
     """Press back."""
     press_back()
+    return True
+
+
+def fast_scroll(intent):
+    """Execute a scroll action via swipe_direction."""
+    from action_executor import swipe_direction
+    direction = intent["direction"]
+    count = intent.get("count", 1)
+    for _ in range(max(count, 1)):
+        swipe_direction(direction, times=1)
+        time.sleep(0.3)
     return True
 
 
@@ -320,6 +496,13 @@ def fast_run(task):
             print(f"  {'OK' if ok else 'FAIL'}")
             return ok
         return False
+
+    # Scroll: no IME needed, just swipe
+    if itype == "scroll":
+        ensure_unlocked()
+        ok = fast_scroll(intent)
+        print(f"  {'OK' if ok else 'FAIL'}")
+        return ok
 
     # Send / Search: need IME for text input + UI dump
     try:

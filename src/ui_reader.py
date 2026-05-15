@@ -4,9 +4,10 @@ import json
 import time
 import sys
 from pathlib import Path
+from config import ADB_PATH
 
 
-ADB = "E:/AA/platform-tools/adb.exe"
+ADB = ADB_PATH
 
 # Nodes that are purely layout containers — no user-visible info
 CONTAINER_CLASSES = {

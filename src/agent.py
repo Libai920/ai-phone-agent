@@ -6,22 +6,316 @@ import sys
 
 from ui_reader import get_ui_state
 from action_executor import execute, enable_u2_ime, restore_ime, ensure_unlocked, check_assert, screencap
-from planner import plan, next_step, plan_with_screenshot, next_step_with_screenshot
-from fast_agent import fast_run
+from fast_agent import fast_run, parse_intent
 
 MAX_ITERATIONS = 12
 SAME_TARGET_RETRIES = 2
 SLEEP_AFTER_ACTION = 0.5
+SCREENSHOT_TASK_KEYWORDS = [
+    "看看",
+    "看一下",
+    "分析",
+    "识别",
+    "判断",
+    "推荐",
+    "哪个",
+    "更好",
+    "第几个",
+    "页面",
+    "截图",
+    "结果",
+    "总结",
+    "比较",
+]
+
+
+class SessionContext:
+    """Lightweight multi-turn conversation state."""
+    def __init__(self):
+        self.history = []           # list of (task, result) tuples
+        self.current_app = None
+        self.last_task_type = None
+        self.last_description = None
+
+    def update(self, task, task_type, result, app=None, description=None):
+        self.history.append((task, result))
+        if len(self.history) > 5:
+            self.history = self.history[-5:]
+        self.last_task_type = task_type
+        if app:
+            self.current_app = app
+        if description:
+            self.last_description = description
+
+    def build_context_string(self):
+        parts = []
+        if self.current_app:
+            parts.append(f"Current app: {self.current_app}")
+        if self.last_task_type:
+            parts.append(f"Last action: {self.last_task_type}")
+        if self.last_description:
+            parts.append(f"Page: {self.last_description[:200]}")
+        if self.history:
+            recent = "; ".join(f"'{t}' -> {r}" for t, r in self.history[-3:])
+            parts.append(f"Recent: {recent}")
+        return "[Context: " + " | ".join(parts) + "]" if parts else ""
+
+
+def _prefers_screenshot(task):
+    """Return True when the task needs visual page understanding."""
+    return any(keyword in task for keyword in SCREENSHOT_TASK_KEYWORDS)
+
+
 def _print_plan(plan_list):
     for s in plan_list:
         print(f"    {s['step']}. {s['description']} → {s.get('expected_page', '?')}")
 
 
-def run(task):
+# Maps query keywords → (app_name, app_label) for auto-selection
+_RESEARCH_APP_GUESS = [
+    (["吃", "饭", "美食", "外卖", "猪脚", "鸡腿", "面", "奶茶", "火锅", "烧烤", "咖啡",
+      "早餐", "午餐", "晚餐", "小吃", "甜品", "蛋糕", "炸鸡", "汉堡", "寿司", "披萨",
+      "餐厅", "饭店", "馆子", "好吃"], ("美团", "美团")),
+    (["教程", "学习", "课程", "教学", "入门", "实战", "视频", "讲解", "怎么", "如何"], ("bilibili", "B站")),
+    (["穿搭", "攻略", "测评", "探店", "好物", "种草", "打卡", "拍照"], ("小红书", "小红书")),
+    (["买", "价格", "便宜", "优惠", "正品", "包邮"], ("淘宝", "淘宝")),
+    (["新闻", "热点", "最新", "今天"], ("知乎", "知乎")),
+]
+
+
+def _guess_app(query):
+    """Guess the best app for a research query based on keywords."""
+    for keywords, (app_name, _) in _RESEARCH_APP_GUESS:
+        for kw in keywords:
+            if kw in query:
+                return app_name
+    return "小红书"  # default fallback
+
+
+def _do_research(task, intent):
+    """Execute a research intent: search → screenshot → analyze → return results."""
+    from researcher import research
+
+    app = intent.get("app")
+    query = intent["query"]
+
+    if not app:
+        app = _guess_app(query)
+        print(f"\n  → 自动选择 {app} 搜索")
+
+    try:
+        return research(task, app, query)
+    except Exception as e:
+        print(f"  Research FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _do_pick_nth(n):
+    """Tap the Nth result from the last research session.
+
+    Reads cached research results, gets the tap_bounds for result N,
+    and taps its center.
+    """
+    from pathlib import Path
+    cache_file = Path(__file__).parent / "last_research.json"
+
+    if not cache_file.exists():
+        print(f"  No previous search results. Try searching first.")
+        return False
+
+    try:
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        results = cached.get("results", [])
+    except Exception:
+        print(f"  Failed to read cached results.")
+        return False
+
+    if n < 1 or n > len(results):
+        print(f"  Result #{n} not found (have {len(results)} results).")
+        return False
+
+    result = results[n - 1]
+    title = result.get("title", "?")
+    bounds = result.get("tap_bounds")
+
+    if not bounds or len(bounds) < 4:
+        print(f"  Result #{n} ({title}) has no tap coordinates. Taking fresh screenshot...")
+        # Fallback: take fresh screenshot, ask LLM to find the result
+        b64, w, h = screencap()
+        if not b64:
+            print(f"  Screenshot failed.")
+            return False
+        prompt = (
+            f"Previous search results:\n{json.dumps(results, ensure_ascii=False)}\n\n"
+            f"The user wants to tap result #{n}: \"{title}\".\n"
+            f"Look at this screenshot (the search results page) and return a JSON object "
+            f"with only the tap coordinates: {{\"tap_bounds\": [x1, y1, x2, y2]}}.\n"
+            f"The screenshot is {w}x{h} pixels. Estimate where \"{title}\" is on screen."
+        )
+        try:
+            from planner import analyze_screenshots
+            # Use a lightweight call — just get coordinates
+            coord_result = analyze_screenshots(
+                f"Find result {n}: {title}", "unknown", title, [b64]
+            )
+            # Result format might not match — extract bounds from results
+            coord_results = coord_result.get("results", [])
+            if coord_results and "tap_bounds" in coord_results[0]:
+                bounds = coord_results[0]["tap_bounds"]
+            else:
+                # Try getting from tap_bounds at top level
+                bounds = coord_result.get("tap_bounds")
+                if not bounds:
+                    print(f"  Could not determine tap coordinates.")
+                    return False
+        except Exception as e:
+            print(f"  Coordinate fallback failed: {e}")
+            return False
+
+    # Tap center of bounds
+    cx = (bounds[0] + bounds[2]) // 2
+    cy = (bounds[1] + bounds[3]) // 2
+    print(f"\n  Tapping result #{n}: {title}")
+    print(f"  Coordinates: ({cx}, {cy}) — bounds={bounds}")
+
+    from action_executor import adb, ensure_unlocked
+    ensure_unlocked()
+    adb("shell", "input", "tap", str(cx), str(cy))
+
+    # Take a quick screenshot to confirm
+    import time
+    time.sleep(1.0)
+    confirm_b64, _, _ = screencap()
+    if confirm_b64:
+        print(f"  Done! Check the phone screen.")
+
+    return True
+
+
+def _do_read(task, ctx=None):
+    """Read what's on screen. Tries UI tree first, falls back to screenshot+LLM."""
+    from action_executor import screencap, ensure_unlocked
+    from ui_reader import get_ui_state
+
+    print(f"\n  Reading screen...")
+    nodes = ensure_unlocked()
+
+    # Try UI tree first — extract all visible text
+    lines = []
+    for n in nodes:
+        text = n.get("text", "")
+        desc = n.get("content_desc", "")
+        label = text or desc
+        if not label or len(label) < 2:
+            continue
+        cls = n.get("class", "").split(".")[-1]
+        bounds = n.get("bounds", "")
+        # bounds format: "[x1,y1][x2,y2]"
+        y = 0
+        if bounds:
+            parts = bounds.replace("[", "").replace("]", ",").split(",")
+            if len(parts) >= 2:
+                try:
+                    y = int(parts[1].strip())
+                except ValueError:
+                    pass
+        lines.append((y, label, cls))
+
+    if len(lines) >= 3:
+        # Sort top-to-bottom, left-to-right
+        lines.sort(key=lambda x: x[0])
+        print(f"\n{'─'*50}")
+        print(f"UI Tree Content ({len(lines)} text elements):")
+        print(f"{'─'*50}")
+        current_y = None
+        for y, label, cls in lines:
+            if current_y is None or abs(y - current_y) > 60:
+                print()  # new row
+            current_y = y
+            try:
+                print(f"  {label}")
+            except UnicodeEncodeError:
+                print(f"  {label.encode('gbk', errors='replace').decode('gbk', errors='replace')}")
+        print(f"\n{'─'*50}")
+        return "\n".join(label for _, label, _ in lines)
+
+    # Fallback: UI tree too sparse, use screenshot + LLM
+    print(f"  UI tree has only {len(lines)} text nodes, falling back to screenshot+LLM...")
+    from planner import describe_screenshot
+
+    b64, w, h = screencap()
+    if not b64:
+        print("  Screenshot failed.")
+        return None
+
+    print(f"  Screenshot: {w}x{h} — asking LLM...")
+    try:
+        description = describe_screenshot(task, b64, context=ctx)
+        print(f"\n{'─'*50}")
+        print(description)
+        print(f"{'─'*50}")
+        return description
+    except Exception as e:
+        print(f"  Describe FAILED: {e}")
+        return None
+
+
+def _do_screenshot():
+    """Take a screenshot and save to a timestamped PNG file."""
+    import base64
+    from datetime import datetime
+    from pathlib import Path
+    from action_executor import screencap, ensure_unlocked
+
+    ensure_unlocked()
+    b64, w, h = screencap()
+    if not b64:
+        print("  Screenshot failed.")
+        return False
+
+    out_dir = Path(__file__).parent.parent / "screenshots"
+    out_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = out_dir / f"screen_{ts}.png"
+    out_file.write_bytes(base64.b64decode(b64))
+    print(f"\n  Screenshot saved: {out_file}")
+    print(f"  Resolution: {w}x{h}")
+    return True
+
+
+def run(task, ctx=None):
     """Execute a task. Fast path for simple ops, LLM for complex ones.
 
     Returns True on success.
     """
+    if ctx:
+        ctx_str = ctx.build_context_string()
+        if ctx_str:
+            task = f"{ctx_str}\n\nNow do: {task}"
+
+    # Pick-Nth path: tap the Nth result from last research
+    intent = parse_intent(task)
+    if intent and intent["type"] == "pick_nth":
+        return _do_pick_nth(intent["n"])
+
+    # Research path: search → screenshot → analyze → recommend
+    if intent and intent["type"] == "research":
+        try:
+            result = _do_research(task, intent)
+            return result is not None and result.get("results")
+        finally:
+            restore_ime()
+
+    # Read path: UI tree → (fallback: screenshot + LLM)
+    if intent and intent["type"] == "read":
+        return _do_read(intent["task"]) is not None
+
+    # Screenshot path: save to file
+    if intent and intent["type"] == "screenshot":
+        return _do_screenshot()
+
     # Fast path: no LLM, rule-based execution
     if fast_run(task):
         return True
@@ -35,6 +329,8 @@ def run(task):
 
 def _run(task):
     """Inner run — IME is managed by outer run()."""
+    from planner import plan, next_step
+
     print(f"\n{'='*50}")
     print(f"Task: {task}")
     print(f"{'='*50}")
@@ -45,9 +341,13 @@ def _run(task):
 
     # Phase 1: initial plan — use screenshots if UI tree is too sparse
     print(f"\n[1] Reading screen: {len(nodes)} nodes")
-    use_screenshots = len(nodes) < 5
+    prefer_screenshot = _prefers_screenshot(task)
+    use_screenshots = prefer_screenshot or len(nodes) < 5
 
-    if use_screenshots:
+    if prefer_screenshot:
+        print("[2] Visual task, switching to screenshot mode...")
+        return _run_with_screenshots(task)
+    if len(nodes) < 5:
         print("[2] UI tree sparse, switching to screenshot mode...")
         return _run_with_screenshots(task)
 
@@ -101,10 +401,13 @@ def _run(task):
         else:
             print(f"  Action: {act_label} {action.get('target', '')}")
         try:
-            hit = execute(nodes_before, action)
+            result = execute(nodes_before, action)
+            hit = result.get("hit")
             if hit:
                 label = hit.get("text") or hit.get("content_desc") or hit.get("resource_id", "")
                 print(f"  Executed on: {label} at {hit.get('bounds', '?')}")
+            else:
+                print(f"  Executed: {result.get('message', action.get('action', 'ok'))}")
         except RuntimeError as e:
             print(f"  EXEC FAIL: {e}")
             # Track repeated failures on same target
@@ -204,6 +507,8 @@ def _run(task):
 
 def _run_with_screenshots(task):
     """Slow path using screenshots instead of UI tree (for apps that hide accessibility)."""
+    from planner import plan_with_screenshot, next_step_with_screenshot, verify_screenshot_action
+
     print(f"\n{'='*50}")
     print(f"Task: {task}  [SCREENSHOT MODE]")
     print(f"{'='*50}")
@@ -284,42 +589,149 @@ def _run_with_screenshots(task):
         if not b64:
             return False
 
-        # For screenshot mode, verify by asking the LLM (lightweight)
-        # For now, just trust the action succeeded
-        print(f"  Verify: (screenshot mode — trusting action)")
-
         history_text = json.dumps(plan_steps, ensure_ascii=False)
-        plan_idx += 1
-        nodes = ensure_unlocked()
-
-        if plan_idx >= len(plan_steps):
-            print(f"\n{'='*50}")
-            print(f"ALL STEPS COMPLETE ({len(plan_steps)} steps, {iteration} iterations)")
-            print(f"{'='*50}")
-            return True
-
-        # Get next action
-        print(f"\n  → Advancing to step {plan_idx+1}: {plan_steps[plan_idx].get('description', '?')}")
         try:
-            result = next_step_with_screenshot(task, history_text, "OK", b64)
-            action = result.get("next_action", {})
+            verification = verify_screenshot_action(
+                task,
+                action,
+                action.get("assert", {}),
+                b64,
+            )
         except Exception as e:
-            print(f"  NEXT_STEP FAIL: {e}")
-            return False
-        if not action:
-            print("  No next_action, assuming plan complete.")
-            return True
+            print(f"  VERIFY FAIL: {e}")
+            verification = {"ok": False, "message": f"verification failed: {e}"}
+
+        ok = verification.get("ok", False)
+        msg = verification.get("message", "")
+        print(f"  Verify: {'OK' if ok else 'FAIL'} — {msg}")
+
+        if ok:
+            plan_idx += 1
+            nodes = ensure_unlocked()
+
+            if plan_idx >= len(plan_steps):
+                print(f"\n{'='*50}")
+                print(f"ALL STEPS COMPLETE ({len(plan_steps)} steps, {iteration} iterations)")
+                print(f"{'='*50}")
+                return True
+
+            # Get next action
+            print(f"\n  → Advancing to step {plan_idx+1}: {plan_steps[plan_idx].get('description', '?')}")
+            try:
+                result = next_step_with_screenshot(task, history_text, f"OK: {msg}", b64)
+                action = result.get("next_action", {})
+            except Exception as e:
+                print(f"  NEXT_STEP FAIL: {e}")
+                return False
+            if not action:
+                print("  No next_action, assuming plan complete.")
+                return True
+        else:
+            print(f"\n  ! Screenshot assert failed, re-planning...")
+            try:
+                result = next_step_with_screenshot(task, history_text, f"FAIL: {msg}", b64)
+                plan_steps = result.get("plan_revision", result.get("plan", plan_steps))
+                action = result.get("next_action", {})
+                plan_idx = 0
+            except Exception as e:
+                print(f"  RE-PLAN FAIL: {e}")
+                return False
+            if not action:
+                print("  No revised action, giving up.")
+                return False
 
     print(f"\n  Max iterations ({MAX_ITERATIONS}) reached.")
     return False
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python agent.py <task>")
-        print("Example: python agent.py 打开微信")
-        sys.exit(1)
+def _print_json(payload):
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
-    task = " ".join(sys.argv[1:])
+
+def chat():
+    """Interactive chat loop with context persistence."""
+    print("=" * 50)
+    print("AI Phone Agent - Chat Mode")
+    print("Type a task, '退出'/exit to quit")
+    print("=" * 50)
+
+    ctx = SessionContext()
+    while True:
+        try:
+            task = input("\nYou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not task:
+            continue
+        if task in ("退出", "exit", "quit", "再见", ":q"):
+            print("Goodbye!")
+            break
+
+        intent = parse_intent(task)
+        task_type = intent["type"] if intent else "unknown"
+        success = run(task, ctx=ctx)
+
+        result = "OK" if success else "FAIL"
+        app = intent.get("app") if intent else None
+        if task_type == "research":
+            ctx.update(task, task_type, result, app=app)
+        elif task_type == "open":
+            ctx.update(task, task_type, result, app=app)
+        elif task_type == "read":
+            ctx.update(task, task_type, result, description="(described above)")
+        else:
+            ctx.update(task, task_type, result)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    dry_run = False
+    allow_send = False
+    chat_mode = False
+    args = []
+    for arg in argv:
+        if arg == "--dry-run":
+            dry_run = True
+        elif arg == "--yes":
+            allow_send = True
+        elif arg == "--chat":
+            chat_mode = True
+        else:
+            args.append(arg)
+
+    if chat_mode:
+        return 0 if chat() else 1
+
+    if not args:
+        print("Usage: python agent.py [--dry-run] [--chat] [--yes] <task>")
+        print("Example: python agent.py 打开微信")
+        return 1
+
+    task = " ".join(args)
+    intent = parse_intent(task)
+    if dry_run:
+        _print_json({
+            "task": task,
+            "intent": intent,
+            "prefers_screenshot": _prefers_screenshot(task),
+        })
+        return 0
+
+    if intent and intent.get("type") == "send" and not allow_send:
+        _print_json({
+            "status": "confirmation_required",
+            "message": "This send task will operate the phone and may send a real message. Re-run with --yes to execute.",
+            "task": task,
+            "intent": intent,
+        })
+        return 2
+
     success = run(task)
-    sys.exit(0 if success else 1)
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -4,5 +4,9 @@
   "钉钉": "com.alibaba.android.rimet",
   "快手": "com.kuaishou.nebula",
   "微信读书": "com.tencent.weread",
-  "百度地图": "com.baidu.BaiduMap"
+  "百度地图": "com.baidu.BaiduMap",
+  "b站": "tv.danmaku.bili",
+  "美团": "com.sankuai.meituan",
+  "知乎": "com.zhihu.android",
+  "微信": "com.tencent.mm"
 }
