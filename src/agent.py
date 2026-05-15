@@ -11,6 +11,29 @@ from fast_agent import fast_run, parse_intent
 MAX_ITERATIONS = 12
 SAME_TARGET_RETRIES = 2
 SLEEP_AFTER_ACTION = 0.5
+SCREENSHOT_TASK_KEYWORDS = [
+    "看看",
+    "看一下",
+    "分析",
+    "识别",
+    "判断",
+    "推荐",
+    "哪个",
+    "更好",
+    "第几个",
+    "页面",
+    "截图",
+    "结果",
+    "总结",
+    "比较",
+]
+
+
+def _prefers_screenshot(task):
+    """Return True when the task needs visual page understanding."""
+    return any(keyword in task for keyword in SCREENSHOT_TASK_KEYWORDS)
+
+
 def _print_plan(plan_list):
     for s in plan_list:
         print(f"    {s['step']}. {s['description']} → {s.get('expected_page', '?')}")
@@ -182,9 +205,13 @@ def _run(task):
 
     # Phase 1: initial plan — use screenshots if UI tree is too sparse
     print(f"\n[1] Reading screen: {len(nodes)} nodes")
-    use_screenshots = len(nodes) < 5
+    prefer_screenshot = _prefers_screenshot(task)
+    use_screenshots = prefer_screenshot or len(nodes) < 5
 
-    if use_screenshots:
+    if prefer_screenshot:
+        print("[2] Visual task, switching to screenshot mode...")
+        return _run_with_screenshots(task)
+    if len(nodes) < 5:
         print("[2] UI tree sparse, switching to screenshot mode...")
         return _run_with_screenshots(task)
 

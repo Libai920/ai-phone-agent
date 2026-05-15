@@ -30,6 +30,12 @@ class ParseIntentTests(unittest.TestCase):
             {"type": "send", "app": "QQ", "target": "文件传输助手", "text": "你好"},
         )
 
+    def test_send_to_wechat_file_transfer_assistant(self):
+        self.assertEqual(
+            parse_intent("给微信文件传输助手发1"),
+            {"type": "send", "target": "微信文件传输助手", "text": "1"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

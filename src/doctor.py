@@ -1,5 +1,6 @@
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from config import ADB_PATH, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL
@@ -68,14 +69,20 @@ def check_adb(adb_path=ADB_PATH):
     return checks
 
 
-def check_ui_dump(adb_path=ADB_PATH):
-    try:
-        result = _run([adb_path, "shell", "uiautomator", "dump", "/sdcard/doctor_ui.xml"], timeout=20)
-    except Exception as e:
-        return {"name": "uiautomator dump", "ok": False, "message": str(e)}
-    if result.returncode != 0:
-        return {"name": "uiautomator dump", "ok": False, "message": result.stderr.strip()}
-    return {"name": "uiautomator dump", "ok": True, "message": "ok"}
+def check_ui_dump(adb_path=ADB_PATH, attempts=3):
+    last_message = ""
+    for attempt in range(attempts):
+        try:
+            result = _run([adb_path, "shell", "uiautomator", "dump", "/sdcard/doctor_ui.xml"], timeout=20)
+        except Exception as e:
+            last_message = str(e)
+        else:
+            if result.returncode == 0:
+                return {"name": "uiautomator dump", "ok": True, "message": "ok"}
+            last_message = result.stderr.strip() or result.stdout.strip()
+        if attempt < attempts - 1:
+            time.sleep(1.0)
+    return {"name": "uiautomator dump", "ok": False, "message": last_message}
 
 
 def collect_checks():

@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -25,6 +26,18 @@ class DoctorTests(unittest.TestCase):
         self.assertIn("missing", token_check["message"])
         self.assertTrue(model_check["ok"])
         self.assertNotIn("sk-", str(checks))
+
+    @patch("doctor.time.sleep")
+    @patch("doctor._run")
+    def test_check_ui_dump_retries_transient_failure(self, run, _sleep):
+        failed = Mock(returncode=1, stderr="ERROR: could not get idle state.", stdout="")
+        succeeded = Mock(returncode=0, stderr="", stdout="UI hierarchy dumped")
+        run.side_effect = [failed, succeeded]
+
+        result = doctor.check_ui_dump("adb")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":
