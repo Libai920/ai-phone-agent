@@ -510,10 +510,24 @@ def _run_with_screenshots(task):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python agent.py <task>")
+        print("Usage: python agent.py [--dry-run] <task>")
         print("Example: python agent.py 打开微信")
         sys.exit(1)
 
-    task = " ".join(sys.argv[1:])
+    dry_run = sys.argv[1] == "--dry-run"
+    args = sys.argv[2:] if dry_run else sys.argv[1:]
+    if not args:
+        print("Usage: python agent.py [--dry-run] <task>")
+        sys.exit(1)
+
+    task = " ".join(args)
+    if dry_run:
+        print(json.dumps({
+            "task": task,
+            "intent": parse_intent(task),
+            "prefers_screenshot": _prefers_screenshot(task),
+        }, ensure_ascii=False, indent=2))
+        sys.exit(0)
+
     success = run(task)
     sys.exit(0 if success else 1)
