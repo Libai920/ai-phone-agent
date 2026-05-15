@@ -6,8 +6,7 @@ import sys
 
 from ui_reader import get_ui_state
 from action_executor import execute, enable_u2_ime, restore_ime, ensure_unlocked, check_assert, screencap
-from planner import plan, next_step, plan_with_screenshot, next_step_with_screenshot
-from fast_agent import fast_run
+from fast_agent import fast_run, parse_intent
 
 MAX_ITERATIONS = 12
 SAME_TARGET_RETRIES = 2
@@ -17,11 +16,147 @@ def _print_plan(plan_list):
         print(f"    {s['step']}. {s['description']} → {s.get('expected_page', '?')}")
 
 
+# Maps query keywords → (app_name, app_label) for auto-selection
+_RESEARCH_APP_GUESS = [
+    (["吃", "饭", "美食", "外卖", "猪脚", "鸡腿", "面", "奶茶", "火锅", "烧烤", "咖啡",
+      "早餐", "午餐", "晚餐", "小吃", "甜品", "蛋糕", "炸鸡", "汉堡", "寿司", "披萨",
+      "餐厅", "饭店", "馆子", "好吃"], ("美团", "美团")),
+    (["教程", "学习", "课程", "教学", "入门", "实战", "视频", "讲解", "怎么", "如何"], ("bilibili", "B站")),
+    (["穿搭", "攻略", "测评", "探店", "好物", "种草", "打卡", "拍照"], ("小红书", "小红书")),
+    (["买", "价格", "便宜", "优惠", "正品", "包邮"], ("淘宝", "淘宝")),
+    (["新闻", "热点", "最新", "今天"], ("知乎", "知乎")),
+]
+
+
+def _guess_app(query):
+    """Guess the best app for a research query based on keywords."""
+    for keywords, (app_name, _) in _RESEARCH_APP_GUESS:
+        for kw in keywords:
+            if kw in query:
+                return app_name
+    return "小红书"  # default fallback
+
+
+def _do_research(task, intent):
+    """Execute a research intent: search → screenshot → analyze → return results."""
+    from researcher import research
+
+    app = intent.get("app")
+    query = intent["query"]
+
+    if not app:
+        app = _guess_app(query)
+        print(f"\n  → 自动选择 {app} 搜索")
+
+    try:
+        return research(task, app, query)
+    except Exception as e:
+        print(f"  Research FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def _do_pick_nth(n):
+    """Tap the Nth result from the last research session.
+
+    Reads cached research results, gets the tap_bounds for result N,
+    and taps its center.
+    """
+    from pathlib import Path
+    cache_file = Path(__file__).parent / "last_research.json"
+
+    if not cache_file.exists():
+        print(f"  No previous search results. Try searching first.")
+        return False
+
+    try:
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        results = cached.get("results", [])
+    except Exception:
+        print(f"  Failed to read cached results.")
+        return False
+
+    if n < 1 or n > len(results):
+        print(f"  Result #{n} not found (have {len(results)} results).")
+        return False
+
+    result = results[n - 1]
+    title = result.get("title", "?")
+    bounds = result.get("tap_bounds")
+
+    if not bounds or len(bounds) < 4:
+        print(f"  Result #{n} ({title}) has no tap coordinates. Taking fresh screenshot...")
+        # Fallback: take fresh screenshot, ask LLM to find the result
+        b64, w, h = screencap()
+        if not b64:
+            print(f"  Screenshot failed.")
+            return False
+        prompt = (
+            f"Previous search results:\n{json.dumps(results, ensure_ascii=False)}\n\n"
+            f"The user wants to tap result #{n}: \"{title}\".\n"
+            f"Look at this screenshot (the search results page) and return a JSON object "
+            f"with only the tap coordinates: {{\"tap_bounds\": [x1, y1, x2, y2]}}.\n"
+            f"The screenshot is {w}x{h} pixels. Estimate where \"{title}\" is on screen."
+        )
+        try:
+            from planner import analyze_screenshots
+            # Use a lightweight call — just get coordinates
+            coord_result = analyze_screenshots(
+                f"Find result {n}: {title}", "unknown", title, [b64]
+            )
+            # Result format might not match — extract bounds from results
+            coord_results = coord_result.get("results", [])
+            if coord_results and "tap_bounds" in coord_results[0]:
+                bounds = coord_results[0]["tap_bounds"]
+            else:
+                # Try getting from tap_bounds at top level
+                bounds = coord_result.get("tap_bounds")
+                if not bounds:
+                    print(f"  Could not determine tap coordinates.")
+                    return False
+        except Exception as e:
+            print(f"  Coordinate fallback failed: {e}")
+            return False
+
+    # Tap center of bounds
+    cx = (bounds[0] + bounds[2]) // 2
+    cy = (bounds[1] + bounds[3]) // 2
+    print(f"\n  Tapping result #{n}: {title}")
+    print(f"  Coordinates: ({cx}, {cy}) — bounds={bounds}")
+
+    from action_executor import adb, ensure_unlocked
+    ensure_unlocked()
+    adb("shell", "input", "tap", str(cx), str(cy))
+
+    # Take a quick screenshot to confirm
+    import time
+    time.sleep(1.0)
+    confirm_b64, _, _ = screencap()
+    if confirm_b64:
+        print(f"  Done! Check the phone screen.")
+
+    return True
+
+
 def run(task):
     """Execute a task. Fast path for simple ops, LLM for complex ones.
 
     Returns True on success.
     """
+    # Pick-Nth path: tap the Nth result from last research
+    intent = parse_intent(task)
+    if intent and intent["type"] == "pick_nth":
+        return _do_pick_nth(intent["n"])
+
+    # Research path: search → screenshot → analyze → recommend
+    if intent and intent["type"] == "research":
+        try:
+            result = _do_research(task, intent)
+            return result is not None and result.get("results")
+        finally:
+            restore_ime()
+
     # Fast path: no LLM, rule-based execution
     if fast_run(task):
         return True
@@ -35,6 +170,8 @@ def run(task):
 
 def _run(task):
     """Inner run — IME is managed by outer run()."""
+    from planner import plan, next_step
+
     print(f"\n{'='*50}")
     print(f"Task: {task}")
     print(f"{'='*50}")
@@ -204,6 +341,8 @@ def _run(task):
 
 def _run_with_screenshots(task):
     """Slow path using screenshots instead of UI tree (for apps that hide accessibility)."""
+    from planner import plan_with_screenshot, next_step_with_screenshot
+
     print(f"\n{'='*50}")
     print(f"Task: {task}  [SCREENSHOT MODE]")
     print(f"{'='*50}")

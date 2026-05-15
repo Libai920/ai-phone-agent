@@ -47,6 +47,40 @@ _OPEN_RE = re.compile(r"打开(?P<app>.+)")
 # Pattern: "返回" / "退出"
 _BACK_RE = re.compile(r"^(返回|退出|back)$")
 
+# ── research intent patterns ────────────────────────────────────
+
+# "在B站搜大模型教程" / "在美团搜猪脚饭"
+_RESEARCH_IN_APP_RE = re.compile(
+    r"在(?P<app>.+?)(?:里|中|上)?(?:搜索|搜|找|查找)(?P<query>.+)"
+)
+# "帮我在B站搜X" / "帮我在美团找X" (explicit "在" before app)
+_RESEARCH_HELP_IN_APP_RE = re.compile(
+    r"(?:帮我|给我|帮忙)在(?P<app>.+?)(?:里|中|上)?(?:搜索|搜|找|查找)(?P<query>.+)"
+)
+# "帮我找猪脚饭" / "帮我搜好吃的" / "给我推荐火锅" (no app specified)
+_RESEARCH_HELP_NO_APP_RE = re.compile(
+    r"(?:帮我|给我|帮忙)(?:找|搜索|搜|推荐)(?P<query>.+)"
+)
+# "推荐X" / "有什么好的X"
+_RESEARCH_RECOMMEND_RE = re.compile(
+    r"(?:推荐|有什么好的|有什么好)(?P<query>.+)"
+)
+# "搜一下B站大模型教程" — app between verb and query, only if app is a known name
+_RESEARCH_SIMPLE_RE = re.compile(
+    r"(?:搜索|搜|找)(?:一下|一搜)?(?P<rest>.+)"
+)
+
+# ── pick result intent ──────────────────────────────────────────
+
+# "点第1个" / "打开第2个" / "第3个"
+_PICK_NTH_RE = re.compile(
+    r"(?:点|打开|选|点击)(?:第)?(?P<n>\d+)(?:个|号|项)"
+)
+# Bare "1" / "第1个"
+_PICK_NTH_BARE_RE = re.compile(
+    r"^第?(?P<n>\d+)(?:个|号|项)?$"
+)
+
 
 def _get_foreground_package():
     """Return the package name of the currently foreground app, or None."""
@@ -73,6 +107,16 @@ def parse_intent(task):
     """
     task = task.strip()
 
+    # 0. Pick from last research results
+    m = _PICK_NTH_RE.search(task)
+    if not m:
+        m = _PICK_NTH_BARE_RE.match(task)
+    if m:
+        n = int(m.group("n"))
+        if 1 <= n <= 10:
+            return {"type": "pick_nth", "n": n}
+
+    # 1. Specific single-action intents
     m = _BACK_RE.match(task)
     if m:
         return {"type": "back"}
@@ -87,15 +131,52 @@ def parse_intent(task):
     if m:
         return {"type": "open", "app": m.group("app").strip()}
 
-    m = _SEARCH_IN_APP_RE.match(task)
+    # 2. Research intents — explicit app in query
+    m = _RESEARCH_IN_APP_RE.match(task)
     if m:
-        return {"type": "search", "app": m.group("app").strip(),
+        return {"type": "research", "app": m.group("app").strip(),
                 "query": m.group("query").strip()}
 
+    m = _RESEARCH_HELP_IN_APP_RE.match(task)
+    if m:
+        return {"type": "research", "app": m.group("app").strip(),
+                "query": m.group("query").strip()}
+
+    # 3. Search with app in old format — short queries stay as search, long → research
+    m = _SEARCH_IN_APP_RE.match(task)
+    if m:
+        query = m.group("query").strip()
+        app = m.group("app").strip()
+        if len(query) >= 3:
+            return {"type": "research", "app": app, "query": query}
+        return {"type": "search", "app": app, "query": query}
+
+    m = _RESEARCH_HELP_NO_APP_RE.match(task)
+    if m:
+        return {"type": "research", "query": m.group("query").strip()}
+
+    m = _RESEARCH_RECOMMEND_RE.match(task)
+    if m:
+        return {"type": "research", "query": m.group("query").strip()}
+
+    m = _RESEARCH_SIMPLE_RE.match(task)
+    if m:
+        rest = m.group("rest").strip()
+        for name in sorted(_KNOWN_APP_NAMES, key=len, reverse=True):
+            if rest.startswith(name) and len(rest) > len(name):
+                return {"type": "research", "app": name,
+                        "query": rest[len(name):].strip()}
+        return {"type": "research", "query": rest}
+
+    # 4. Simple search (short queries only)
     m = _SEARCH_RE.match(task)
     if m:
-        return {"type": "search", "query": m.group("query").strip()}
+        query = m.group("query").strip()
+        if len(query) >= 4:
+            return {"type": "research", "query": query}
+        return {"type": "search", "query": query}
 
+    # 5. Send/message intents
     m = _SEND_IN_APP_WITH_TARGET_RE.match(task)
     if m:
         return {"type": "send", "app": m.group("app").strip(),
@@ -161,7 +242,7 @@ def fast_open(intent):
     return False
 
 
-_KNOWN_APP_NAMES = ["微信", "QQ", "支付宝", "抖音", "淘宝", "微博", "知乎", "小红书", "拼多多", "京东", "饿了么", "美团"]
+_KNOWN_APP_NAMES = ["微信", "QQ", "支付宝", "抖音", "淘宝", "微博", "知乎", "小红书", "拼多多", "京东", "饿了么", "美团", "B站", "哔哩哔哩", "bilibili", "快手", "高德地图", "高德", "百度地图", "百度", "酷狗音乐", "酷狗", "网易云音乐", "钉钉", "闲鱼", "得物"]
 
 
 def fast_send(intent, nodes):

@@ -6,12 +6,12 @@ Uses DeepSeek's Anthropic-compatible Messages API.
 import json
 import os
 from anthropic import Anthropic
+from config import ANTHROPIC_BASE_URL, ANTHROPIC_MODEL
 
 
 # DeepSeek endpoint via Anthropic SDK
-API_KEY = os.environ["ANTHROPIC_AUTH_TOKEN"]
-BASE_URL = os.environ.get("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-MODEL = os.environ.get("ANTHROPIC_MODEL", "deepseek-v4-pro")
+BASE_URL = ANTHROPIC_BASE_URL
+MODEL = ANTHROPIC_MODEL
 
 _client = None
 
@@ -19,7 +19,10 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        _client = Anthropic(api_key=API_KEY, base_url=BASE_URL)
+        api_key = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_AUTH_TOKEN is required for LLM planning")
+        _client = Anthropic(api_key=api_key, base_url=BASE_URL)
     return _client
 
 
@@ -327,6 +330,103 @@ def next_step_with_screenshot(task, plan_text, last_assert_result, b64_data):
                 },
             ],
         }],
+    )
+
+    text = _extract_text(resp.content)
+    return _parse_json(text)
+
+
+ANALYSIS_PROMPT = """You are an AI assistant that analyzes mobile app search results from screenshots. The user has searched for something and you are looking at the results page.
+
+## Your job
+
+1. Identify what type of content you see: video tutorials, restaurants/food, products, articles, etc.
+2. Extract each visible result's key information
+3. Estimate the tap coordinates (center of the result's clickable area)
+4. Rate relevance to the user's query (1-10)
+5. Return top recommendations in structured JSON
+
+## Output format
+
+You MUST respond with ONLY this exact JSON structure — no markdown fences, no explanations:
+
+{
+  "type": "video" | "food" | "product" | "article" | "mixed",
+  "app": "bilibili" | "meituan" | "taobao" | "xiaohongshu" | "douyin" | "unknown",
+  "results": [
+    {
+      "title": "what you see as the main title",
+      "subtitle": "author / rating / price / distance — whatever secondary info is visible",
+      "description": "what this result offers, in 1 sentence",
+      "relevance": 9,
+      "tap_bounds": [500, 1200, 1200, 1350],
+      "action": "click this result to view details"
+    }
+  ]
+}
+
+## Coordinate system
+
+The screenshot resolution is the phone's actual screen resolution. Use pixel coordinates directly from what you see in the image.
+
+For `tap_bounds`: provide [x1, y1, x2, y2] of the rectangular area you recommend tapping. x1,y1 is the top-left corner of the result item, x2,y2 is the bottom-right. The system will tap the center of this rectangle. Be generous — include the full clickable card, not just the text.
+
+## Rules
+
+1. Return 3-5 results maximum — only the most relevant ones
+2. For food/restaurants, include rating and price range if visible
+3. For videos, include the uploader/author and view count if visible
+4. For products, include price if visible
+5. Be precise with titles — transcribe what you actually SEE, don't invent
+6. relevance score: 10 = perfect match, 7+ = good match, <5 = don't include
+7. The "action" field should briefly describe what would happen if the user clicks this result
+8. tap_bounds MUST be accurate pixel coordinates based on what you see — this is used to actually tap the screen
+"""
+
+
+def analyze_screenshots(task, app_name, query, screenshots_b64):
+    """Analyze search result screenshots and return structured recommendations.
+
+    Args:
+        task: original user task (e.g. "在B站搜大模型教程")
+        app_name: the app being searched (e.g. "bilibili", "meituan")
+        query: the search query (e.g. "大模型教程")
+        screenshots_b64: list of base64-encoded PNG strings
+
+    Returns: {"type": "...", "app": "...", "results": [...]}
+    """
+    if not screenshots_b64:
+        return {"type": "error", "app": app_name, "results": [], "error": "No screenshots"}
+
+    client = _get_client()
+    content = []
+
+    for i, b64 in enumerate(screenshots_b64):
+        content.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": b64,
+            },
+        })
+
+    content.append({
+        "type": "text",
+        "text": (
+            f"User task: {task}\n"
+            f"App: {app_name}\n"
+            f"Search query: {query}\n\n"
+            f"Analyze these search result screenshots. Extract the most relevant results, "
+            f"rate their relevance, and return your analysis in the required JSON format."
+        ),
+    })
+
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=2048,
+        system=ANALYSIS_PROMPT,
+        messages=[{"role": "user", "content": content}],
     )
 
     text = _extract_text(resp.content)

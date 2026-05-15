@@ -3,8 +3,9 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from config import ADB_PATH
 
-ADB = "E:/AA/platform-tools/adb.exe"
+ADB = ADB_PATH
 
 
 def adb(*args, timeout=15):
@@ -28,6 +29,8 @@ _APP_ALIASES = {
     "抖音": ["aweme", "ugc.aweme"],
     "快手": ["kuaishou.nebula", "smile.gifmaker"],
     "哔哩哔哩": ["tv.danmaku", "bilibili"],
+    "B站": ["tv.danmaku", "bilibili"],
+    "bilibili": ["tv.danmaku"],
     "微博": ["weibo"],
     "百度贴吧": ["baidu.tieba"],
     "小红书": ["xingin"],
