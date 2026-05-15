@@ -238,10 +238,13 @@ def _run(task):
         else:
             print(f"  Action: {act_label} {action.get('target', '')}")
         try:
-            hit = execute(nodes_before, action)
+            result = execute(nodes_before, action)
+            hit = result.get("hit")
             if hit:
                 label = hit.get("text") or hit.get("content_desc") or hit.get("resource_id", "")
                 print(f"  Executed on: {label} at {hit.get('bounds', '?')}")
+            else:
+                print(f"  Executed: {result.get('message', action.get('action', 'ok'))}")
         except RuntimeError as e:
             print(f"  EXEC FAIL: {e}")
             # Track repeated failures on same target

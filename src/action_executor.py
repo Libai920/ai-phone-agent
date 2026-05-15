@@ -245,6 +245,15 @@ def click(nodes, target):
     return node
 
 
+def _result(action, hit=None, message="ok"):
+    return {
+        "ok": True,
+        "action": action,
+        "hit": hit,
+        "message": message,
+    }
+
+
 U2_IME = "com.github.uiautomator/.AdbKeyboard"
 _ime_switched = False
 _prev_ime = None
@@ -420,15 +429,17 @@ def execute(nodes, action):
         "direction": "up"|"down"|"left"|"right" (for swipe),
         "package": "..." (for launch)
     }
-    Returns the matched node (for click) or None.
+    Returns {"ok": bool, "action": str, "hit": node|None, "message": str}.
     """
     act = action["action"]
 
     if act == "click":
-        return click(nodes, action.get("target", {}))
+        hit = click(nodes, action.get("target", {}))
+        label = hit.get("text") or hit.get("content_desc") or hit.get("resource_id", "")
+        return _result(act, hit=hit, message=f"clicked {label}".strip())
     elif act == "input":
         input_text(action.get("text", ""))
-        return None
+        return _result(act, message="input text")
     elif act == "swipe":
         target = action.get("target")
         if target and "bounds" in target:
@@ -438,15 +449,16 @@ def execute(nodes, action):
                 swipe(c[0], c[1] + 200, c[0], c[1] - 200)
         else:
             swipe_direction(action.get("direction", "up"))
-        return None
+        return _result(act, message=f"swiped {action.get('direction', 'up')}")
     elif act == "back":
         press_back()
-        return None
+        return _result(act, message="pressed back")
     elif act == "launch":
         launch_app(package=action.get("package", ""), app=action.get("app", ""))
-        return None
+        label = action.get("package") or action.get("app") or "app"
+        return _result(act, message=f"launched {label}")
     else:
-        raise ValueError(f"Unknown action: {act}")
+        raise RuntimeError(f"Unknown action: {act}")
 
 
 # ── lock detection ─────────────────────────────────────────────
@@ -541,7 +553,8 @@ if __name__ == "__main__":
     # Demo: try clicking a common target
     target = {"text": "微信"}
     try:
-        hit = execute(nodes, {"action": "click", "target": target})
+        result = execute(nodes, {"action": "click", "target": target})
+        hit = result["hit"]
         print(f"Clicked: {hit['text'] or hit['content_desc']} at {_center(hit['bounds'])}")
     except RuntimeError as e:
         print(f"Failed: {e}")
