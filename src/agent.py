@@ -508,26 +508,53 @@ def _run_with_screenshots(task):
     return False
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
+def _print_json(payload):
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if len(argv) < 1:
         print("Usage: python agent.py [--dry-run] <task>")
         print("Example: python agent.py 打开微信")
-        sys.exit(1)
+        return 1
 
-    dry_run = sys.argv[1] == "--dry-run"
-    args = sys.argv[2:] if dry_run else sys.argv[1:]
+    dry_run = False
+    allow_send = False
+    args = []
+    for arg in argv:
+        if arg == "--dry-run":
+            dry_run = True
+        elif arg == "--yes":
+            allow_send = True
+        else:
+            args.append(arg)
     if not args:
         print("Usage: python agent.py [--dry-run] <task>")
-        sys.exit(1)
+        return 1
 
     task = " ".join(args)
+    intent = parse_intent(task)
     if dry_run:
-        print(json.dumps({
+        _print_json({
             "task": task,
-            "intent": parse_intent(task),
+            "intent": intent,
             "prefers_screenshot": _prefers_screenshot(task),
-        }, ensure_ascii=False, indent=2))
-        sys.exit(0)
+        })
+        return 0
+
+    if intent and intent.get("type") == "send" and not allow_send:
+        _print_json({
+            "status": "confirmation_required",
+            "message": "This send task will operate the phone and may send a real message. Re-run with --yes to execute.",
+            "task": task,
+            "intent": intent,
+        })
+        return 2
 
     success = run(task)
-    sys.exit(0 if success else 1)
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
