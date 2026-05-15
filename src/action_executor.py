@@ -257,6 +257,8 @@ def _result(action, hit=None, message="ok"):
 U2_IME = "com.github.uiautomator/.AdbKeyboard"
 _ime_switched = False
 _prev_ime = None
+_screen_width = 1260
+_screen_height = 2800
 
 
 def enable_u2_ime():
@@ -307,19 +309,23 @@ def swipe(x1, y1, x2, y2, duration=300):
     time.sleep(0.5)
 
 
-def swipe_direction(direction):
-    """Swipe up/down/left/right on center screen (fixed 1260x2800 for now)."""
-    cx, cy = 630, 1400
-    if direction == "up":
-        swipe(cx, cy + 400, cx, cy - 400)
-    elif direction == "down":
-        swipe(cx, cy - 400, cx, cy + 400)
-    elif direction == "left":
-        swipe(cx + 400, cy, cx - 400, cy)
-    elif direction == "right":
-        swipe(cx - 400, cy, cx + 400, cy)
-    else:
-        raise ValueError(f"Unknown direction: {direction}")
+def swipe_direction(direction, times=1):
+    """Swipe up/down/left/right on center screen, proportional to screen size."""
+    global _screen_width, _screen_height
+    cx = _screen_width // 2
+    cy = _screen_height // 2
+    dist = max(int(_screen_height * 0.3), 200)
+    for _ in range(times):
+        if direction == "up":
+            swipe(cx, cy + dist, cx, cy - dist)
+        elif direction == "down":
+            swipe(cx, cy - dist, cx, cy + dist)
+        elif direction == "left":
+            swipe(cx + dist, cy, cx - dist, cy)
+        elif direction == "right":
+            swipe(cx - dist, cy, cx + dist, cy)
+        else:
+            raise ValueError(f"Unknown direction: {direction}")
 
 
 def press_back():
@@ -370,7 +376,9 @@ def screencap():
         # Read dimensions from PNG header (IHDR chunk at bytes 16-23)
         if len(png_data) > 24 and png_data[1:4] == b"PNG":
             import struct
+            global _screen_width, _screen_height
             w, h = struct.unpack(">II", png_data[16:24])
+            _screen_width, _screen_height = w, h
             return b64.b64encode(png_data).decode(), w, h
         return None, 0, 0
     except Exception:

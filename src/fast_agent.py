@@ -46,6 +46,8 @@ _OPEN_RE = re.compile(r"打开(?P<app>.+)")
 
 # Pattern: "返回" / "退出"
 _BACK_RE = re.compile(r"^(返回|退出|back)$")
+# Pattern: "截图" / "截屏" / "保存截图"
+_SCREENSHOT_RE = re.compile(r"^(截图|截屏|保存截图|拍个照|screen(?:shot)?|capture)$")
 
 # ── research intent patterns ────────────────────────────────────
 
@@ -70,6 +72,17 @@ _RESEARCH_SIMPLE_RE = re.compile(
     r"(?:搜索|搜|找)(?:一下|一搜)?(?P<rest>.+)"
 )
 
+# Read/describe patterns
+_READ_RE = re.compile(
+    r"(?:看看(?:这个|一下)?(?:页面|屏幕|手机)?"
+    r"|帮我看看(?:这个)?(?:页面|屏幕|手机)?"
+    r"|(?:总结|概括|归纳)一下(?:这个)?(?:页面|内容|屏幕)?"
+    r"|(?:上[面边]|页面[里上]?|屏幕[里上]?|这里)(?:写了?|讲了?|显示了?)(?:什么|啥)"
+    r"|(?:读|念|描述|介绍)(?:一下|一[下遍])(?:这个)?(?:页面|内容|屏幕)?"
+    r"|这是什么(?:页面|屏幕)?|讲了什么|写了什么|有什么内容"
+    r"|(?:描述|介绍)(?:一下)?(?:这个)?(?:屏幕|页面|内容))"
+)
+
 # ── pick result intent ──────────────────────────────────────────
 
 # "点第1个" / "打开第2个" / "第3个"
@@ -79,6 +92,20 @@ _PICK_NTH_RE = re.compile(
 # Bare "1" / "第1个"
 _PICK_NTH_BARE_RE = re.compile(
     r"^第?(?P<n>\d+)(?:个|号|项)?$"
+)
+
+# Scroll patterns
+_SCROLL_COUNT_RE = re.compile(
+    r"(?:往[下上]滑?|翻|滚|滑)(?P<n>[0-9]+)(?:下|页|次|遍)"
+)
+_SCROLL_TO_END_RE = re.compile(
+    r"(?:滑|翻|滚)到底|滑到最[下底]|翻到最[下底]"
+)
+_SCROLL_UP_RE = re.compile(
+    r"^(?:往[上前]滑|上滑|往上翻|上一页|翻上去|向上滑|往上|滚上去)$"
+)
+_SCROLL_DOWN_RE = re.compile(
+    r"^(?:往[下后]滑|下滑|往下翻|滚动|下一页|翻[页下]|向下滑|滑下去)$"
 )
 
 
@@ -120,6 +147,21 @@ def parse_intent(task):
     m = _BACK_RE.match(task)
     if m:
         return {"type": "back"}
+
+    m = _SCREENSHOT_RE.match(task)
+    if m:
+        return {"type": "screenshot"}
+
+    # 1a. Scroll intents
+    m = _SCROLL_COUNT_RE.search(task)
+    if m:
+        return {"type": "scroll", "direction": "up" if "下" in task else "down",
+                "count": int(m.group("n"))}
+    for pattern, direction, count in [(_SCROLL_TO_END_RE, "up", 8),
+                                        (_SCROLL_DOWN_RE, "up", 1),
+                                        (_SCROLL_UP_RE, "down", 1)]:
+        if pattern.match(task):
+            return {"type": "scroll", "direction": direction, "count": count}
 
     m = _OPEN_AND_SEND_RE.match(task)
     if m:
@@ -175,6 +217,10 @@ def parse_intent(task):
         if len(query) >= 4:
             return {"type": "research", "query": query}
         return {"type": "search", "query": query}
+
+    # 4a. Read/describe intent
+    if _READ_RE.match(task):
+        return {"type": "read", "task": task}
 
     # 5. Send/message intents
     m = _SEND_IN_APP_WITH_TARGET_RE.match(task)
@@ -411,6 +457,17 @@ def fast_back():
     return True
 
 
+def fast_scroll(intent):
+    """Execute a scroll action via swipe_direction."""
+    from action_executor import swipe_direction
+    direction = intent["direction"]
+    count = intent.get("count", 1)
+    for _ in range(max(count, 1)):
+        swipe_direction(direction, times=1)
+        time.sleep(0.3)
+    return True
+
+
 # ── dispatcher ─────────────────────────────────────────────────
 
 def fast_run(task):
@@ -439,6 +496,13 @@ def fast_run(task):
             print(f"  {'OK' if ok else 'FAIL'}")
             return ok
         return False
+
+    # Scroll: no IME needed, just swipe
+    if itype == "scroll":
+        ensure_unlocked()
+        ok = fast_scroll(intent)
+        print(f"  {'OK' if ok else 'FAIL'}")
+        return ok
 
     # Send / Search: need IME for text input + UI dump
     try:

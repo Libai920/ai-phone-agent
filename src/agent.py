@@ -29,6 +29,38 @@ SCREENSHOT_TASK_KEYWORDS = [
 ]
 
 
+class SessionContext:
+    """Lightweight multi-turn conversation state."""
+    def __init__(self):
+        self.history = []           # list of (task, result) tuples
+        self.current_app = None
+        self.last_task_type = None
+        self.last_description = None
+
+    def update(self, task, task_type, result, app=None, description=None):
+        self.history.append((task, result))
+        if len(self.history) > 5:
+            self.history = self.history[-5:]
+        self.last_task_type = task_type
+        if app:
+            self.current_app = app
+        if description:
+            self.last_description = description
+
+    def build_context_string(self):
+        parts = []
+        if self.current_app:
+            parts.append(f"Current app: {self.current_app}")
+        if self.last_task_type:
+            parts.append(f"Last action: {self.last_task_type}")
+        if self.last_description:
+            parts.append(f"Page: {self.last_description[:200]}")
+        if self.history:
+            recent = "; ".join(f"'{t}' -> {r}" for t, r in self.history[-3:])
+            parts.append(f"Recent: {recent}")
+        return "[Context: " + " | ".join(parts) + "]" if parts else ""
+
+
 def _prefers_screenshot(task):
     """Return True when the task needs visual page understanding."""
     return any(keyword in task for keyword in SCREENSHOT_TASK_KEYWORDS)
@@ -162,11 +194,107 @@ def _do_pick_nth(n):
     return True
 
 
-def run(task):
+def _do_read(task, ctx=None):
+    """Read what's on screen. Tries UI tree first, falls back to screenshot+LLM."""
+    from action_executor import screencap, ensure_unlocked
+    from ui_reader import get_ui_state
+
+    print(f"\n  Reading screen...")
+    nodes = ensure_unlocked()
+
+    # Try UI tree first — extract all visible text
+    lines = []
+    for n in nodes:
+        text = n.get("text", "")
+        desc = n.get("content_desc", "")
+        label = text or desc
+        if not label or len(label) < 2:
+            continue
+        cls = n.get("class", "").split(".")[-1]
+        bounds = n.get("bounds", "")
+        # bounds format: "[x1,y1][x2,y2]"
+        y = 0
+        if bounds:
+            parts = bounds.replace("[", "").replace("]", ",").split(",")
+            if len(parts) >= 2:
+                try:
+                    y = int(parts[1].strip())
+                except ValueError:
+                    pass
+        lines.append((y, label, cls))
+
+    if len(lines) >= 3:
+        # Sort top-to-bottom, left-to-right
+        lines.sort(key=lambda x: x[0])
+        print(f"\n{'─'*50}")
+        print(f"UI Tree Content ({len(lines)} text elements):")
+        print(f"{'─'*50}")
+        current_y = None
+        for y, label, cls in lines:
+            if current_y is None or abs(y - current_y) > 60:
+                print()  # new row
+            current_y = y
+            try:
+                print(f"  {label}")
+            except UnicodeEncodeError:
+                print(f"  {label.encode('gbk', errors='replace').decode('gbk', errors='replace')}")
+        print(f"\n{'─'*50}")
+        return "\n".join(label for _, label, _ in lines)
+
+    # Fallback: UI tree too sparse, use screenshot + LLM
+    print(f"  UI tree has only {len(lines)} text nodes, falling back to screenshot+LLM...")
+    from planner import describe_screenshot
+
+    b64, w, h = screencap()
+    if not b64:
+        print("  Screenshot failed.")
+        return None
+
+    print(f"  Screenshot: {w}x{h} — asking LLM...")
+    try:
+        description = describe_screenshot(task, b64, context=ctx)
+        print(f"\n{'─'*50}")
+        print(description)
+        print(f"{'─'*50}")
+        return description
+    except Exception as e:
+        print(f"  Describe FAILED: {e}")
+        return None
+
+
+def _do_screenshot():
+    """Take a screenshot and save to a timestamped PNG file."""
+    import base64
+    from datetime import datetime
+    from pathlib import Path
+    from action_executor import screencap, ensure_unlocked
+
+    ensure_unlocked()
+    b64, w, h = screencap()
+    if not b64:
+        print("  Screenshot failed.")
+        return False
+
+    out_dir = Path(__file__).parent.parent / "screenshots"
+    out_dir.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_file = out_dir / f"screen_{ts}.png"
+    out_file.write_bytes(base64.b64decode(b64))
+    print(f"\n  Screenshot saved: {out_file}")
+    print(f"  Resolution: {w}x{h}")
+    return True
+
+
+def run(task, ctx=None):
     """Execute a task. Fast path for simple ops, LLM for complex ones.
 
     Returns True on success.
     """
+    if ctx:
+        ctx_str = ctx.build_context_string()
+        if ctx_str:
+            task = f"{ctx_str}\n\nNow do: {task}"
+
     # Pick-Nth path: tap the Nth result from last research
     intent = parse_intent(task)
     if intent and intent["type"] == "pick_nth":
@@ -179,6 +307,14 @@ def run(task):
             return result is not None and result.get("results")
         finally:
             restore_ime()
+
+    # Read path: UI tree → (fallback: screenshot + LLM)
+    if intent and intent["type"] == "read":
+        return _do_read(intent["task"]) is not None
+
+    # Screenshot path: save to file
+    if intent and intent["type"] == "screenshot":
+        return _do_screenshot()
 
     # Fast path: no LLM, rule-based execution
     if fast_run(task):
@@ -512,25 +648,66 @@ def _print_json(payload):
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def chat():
+    """Interactive chat loop with context persistence."""
+    print("=" * 50)
+    print("AI Phone Agent - Chat Mode")
+    print("Type a task, '退出'/exit to quit")
+    print("=" * 50)
+
+    ctx = SessionContext()
+    while True:
+        try:
+            task = input("\nYou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not task:
+            continue
+        if task in ("退出", "exit", "quit", "再见", ":q"):
+            print("Goodbye!")
+            break
+
+        intent = parse_intent(task)
+        task_type = intent["type"] if intent else "unknown"
+        success = run(task, ctx=ctx)
+
+        result = "OK" if success else "FAIL"
+        app = intent.get("app") if intent else None
+        if task_type == "research":
+            ctx.update(task, task_type, result, app=app)
+        elif task_type == "open":
+            ctx.update(task, task_type, result, app=app)
+        elif task_type == "read":
+            ctx.update(task, task_type, result, description="(described above)")
+        else:
+            ctx.update(task, task_type, result)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    if len(argv) < 1:
-        print("Usage: python agent.py [--dry-run] <task>")
-        print("Example: python agent.py 打开微信")
-        return 1
 
     dry_run = False
     allow_send = False
+    chat_mode = False
     args = []
     for arg in argv:
         if arg == "--dry-run":
             dry_run = True
         elif arg == "--yes":
             allow_send = True
+        elif arg == "--chat":
+            chat_mode = True
         else:
             args.append(arg)
+
+    if chat_mode:
+        return 0 if chat() else 1
+
     if not args:
-        print("Usage: python agent.py [--dry-run] <task>")
+        print("Usage: python agent.py [--dry-run] [--chat] [--yes] <task>")
+        print("Example: python agent.py 打开微信")
         return 1
 
     task = " ".join(args)

@@ -485,6 +485,59 @@ def analyze_screenshots(task, app_name, query, screenshots_b64):
     return _parse_json(text)
 
 
+DESCRIBE_PROMPT = """You are an AI that describes mobile phone screenshots in natural Chinese.
+
+Look at this screenshot carefully and describe what you see:
+
+1. What app/screen this is
+2. Main content visible (text, items, data)
+3. Interactive elements (buttons, tabs, input fields)
+4. Current page/section name within the app
+5. 1-3 suggested next actions the user might take
+
+Respond in 3-5 sentences of plain Chinese plus a bullet list of suggested actions. No JSON, no markdown fences.
+"""
+
+
+def describe_screenshot(task, b64_data, context=None):
+    """Send a screenshot to the LLM for natural-language description.
+
+    Args:
+        task: what the user asked (e.g. "看看这个页面")
+        b64_data: base64-encoded PNG screenshot
+        context: optional dict with keys like current_app, last_action, etc.
+
+    Returns: str — natural language description in Chinese
+    """
+    client = _get_client()
+    ctx_str = ""
+    if context:
+        ctx_str = f"\nContext: {json.dumps(context, ensure_ascii=False)}"
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=1024,
+        system=DESCRIBE_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64_data,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": f"User asked: {task}{ctx_str}\n\nDescribe this screenshot in Chinese.",
+                },
+            ],
+        }],
+    )
+    return _extract_text(resp.content)
+
+
 if __name__ == "__main__":
     from ui_reader import get_ui_state
 

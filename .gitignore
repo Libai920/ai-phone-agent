@@ -5,6 +5,9 @@ __pycache__/
 .claude/
 screen.png
 screen_current.png
+screen_sm.png
+screenshot.txt
+screenshots/
 test_pull.xml
 tmp_wechat_ui.xml
 src/last_research.json
