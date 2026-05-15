@@ -336,6 +336,58 @@ def next_step_with_screenshot(task, plan_text, last_assert_result, b64_data):
     return _parse_json(text)
 
 
+VERIFY_SCREENSHOT_PROMPT = """You verify whether the last action succeeded on an Android phone screenshot.
+
+Return ONLY this JSON object, with no markdown and no explanation:
+
+{"ok":true,"message":"short reason"}
+
+Use ok=true only when the screenshot clearly satisfies the assertion or the expected result of the action.
+Use ok=false when the screenshot clearly does not satisfy it or is ambiguous.
+"""
+
+
+def verify_screenshot_action(task, action, assertion, screenshot_b64):
+    """Verify an action result from a screenshot.
+
+    Returns: {"ok": bool, "message": str}
+    """
+    client = _get_client()
+    resp = client.messages.create(
+        model=MODEL,
+        max_tokens=512,
+        system=VERIFY_SCREENSHOT_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": screenshot_b64,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        f"Task: {task}\n"
+                        f"Last action: {json.dumps(action, ensure_ascii=False)}\n"
+                        f"Assertion: {json.dumps(assertion or {}, ensure_ascii=False)}\n\n"
+                        f"Look at the screenshot and verify whether the last action succeeded."
+                    ),
+                },
+            ],
+        }],
+    )
+
+    result = _parse_json(_extract_text(resp.content))
+    return {
+        "ok": bool(result.get("ok")),
+        "message": result.get("message", ""),
+    }
+
+
 ANALYSIS_PROMPT = """You are an AI assistant that analyzes mobile app search results from screenshots. The user has searched for something and you are looking at the results page.
 
 ## Your job

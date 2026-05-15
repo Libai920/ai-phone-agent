@@ -344,7 +344,7 @@ def _run(task):
 
 def _run_with_screenshots(task):
     """Slow path using screenshots instead of UI tree (for apps that hide accessibility)."""
-    from planner import plan_with_screenshot, next_step_with_screenshot
+    from planner import plan_with_screenshot, next_step_with_screenshot, verify_screenshot_action
 
     print(f"\n{'='*50}")
     print(f"Task: {task}  [SCREENSHOT MODE]")
@@ -426,31 +426,56 @@ def _run_with_screenshots(task):
         if not b64:
             return False
 
-        # For screenshot mode, verify by asking the LLM (lightweight)
-        # For now, just trust the action succeeded
-        print(f"  Verify: (screenshot mode — trusting action)")
-
         history_text = json.dumps(plan_steps, ensure_ascii=False)
-        plan_idx += 1
-        nodes = ensure_unlocked()
-
-        if plan_idx >= len(plan_steps):
-            print(f"\n{'='*50}")
-            print(f"ALL STEPS COMPLETE ({len(plan_steps)} steps, {iteration} iterations)")
-            print(f"{'='*50}")
-            return True
-
-        # Get next action
-        print(f"\n  → Advancing to step {plan_idx+1}: {plan_steps[plan_idx].get('description', '?')}")
         try:
-            result = next_step_with_screenshot(task, history_text, "OK", b64)
-            action = result.get("next_action", {})
+            verification = verify_screenshot_action(
+                task,
+                action,
+                action.get("assert", {}),
+                b64,
+            )
         except Exception as e:
-            print(f"  NEXT_STEP FAIL: {e}")
-            return False
-        if not action:
-            print("  No next_action, assuming plan complete.")
-            return True
+            print(f"  VERIFY FAIL: {e}")
+            verification = {"ok": False, "message": f"verification failed: {e}"}
+
+        ok = verification.get("ok", False)
+        msg = verification.get("message", "")
+        print(f"  Verify: {'OK' if ok else 'FAIL'} — {msg}")
+
+        if ok:
+            plan_idx += 1
+            nodes = ensure_unlocked()
+
+            if plan_idx >= len(plan_steps):
+                print(f"\n{'='*50}")
+                print(f"ALL STEPS COMPLETE ({len(plan_steps)} steps, {iteration} iterations)")
+                print(f"{'='*50}")
+                return True
+
+            # Get next action
+            print(f"\n  → Advancing to step {plan_idx+1}: {plan_steps[plan_idx].get('description', '?')}")
+            try:
+                result = next_step_with_screenshot(task, history_text, f"OK: {msg}", b64)
+                action = result.get("next_action", {})
+            except Exception as e:
+                print(f"  NEXT_STEP FAIL: {e}")
+                return False
+            if not action:
+                print("  No next_action, assuming plan complete.")
+                return True
+        else:
+            print(f"\n  ! Screenshot assert failed, re-planning...")
+            try:
+                result = next_step_with_screenshot(task, history_text, f"FAIL: {msg}", b64)
+                plan_steps = result.get("plan_revision", result.get("plan", plan_steps))
+                action = result.get("next_action", {})
+                plan_idx = 0
+            except Exception as e:
+                print(f"  RE-PLAN FAIL: {e}")
+                return False
+            if not action:
+                print("  No revised action, giving up.")
+                return False
 
     print(f"\n  Max iterations ({MAX_ITERATIONS}) reached.")
     return False
