@@ -54,9 +54,17 @@ class FastSendTests(unittest.TestCase):
             "clickable": True,
             "focusable": False,
         }]
+        after_send_nodes = [{
+            "text": "1",
+            "content_desc": "",
+            "resource_id": "com.tencent.mm:id/message",
+            "class": "android.widget.TextView",
+            "clickable": False,
+            "focusable": False,
+        }]
 
         launch_and_wait.return_value = search_nodes
-        get_ui_state.side_effect = [search_result_nodes, chat_nodes, send_nodes]
+        get_ui_state.side_effect = [search_result_nodes, chat_nodes, send_nodes, after_send_nodes]
         find_and_click.side_effect = [False, True]
 
         ok = fast_agent.fast_send(
@@ -72,6 +80,51 @@ class FastSendTests(unittest.TestCase):
             if call.args[1].get("action") == "input"
         ]
         self.assertEqual(input_texts, ["文件传输助手", "1"])
+
+    @patch("fast_agent.time.sleep")
+    @patch("fast_agent._find_and_click", return_value=True)
+    @patch("fast_agent.get_ui_state")
+    @patch("fast_agent.execute")
+    def test_fast_send_verifies_message_after_tapping_send(
+        self,
+        execute,
+        get_ui_state,
+        _find_and_click,
+        _sleep,
+    ):
+        chat_nodes = [{
+            "text": "",
+            "content_desc": "",
+            "resource_id": "com.tencent.mm:id/input",
+            "class": "android.widget.EditText",
+            "clickable": True,
+            "focusable": True,
+        }]
+        send_nodes = [{
+            "text": "发送",
+            "content_desc": "",
+            "resource_id": "com.tencent.mm:id/send",
+            "class": "android.widget.Button",
+            "clickable": True,
+            "focusable": False,
+        }]
+        after_send_nodes = [{
+            "text": "1",
+            "content_desc": "",
+            "resource_id": "com.tencent.mm:id/message",
+            "class": "android.widget.TextView",
+            "clickable": False,
+            "focusable": False,
+        }]
+        get_ui_state.side_effect = [chat_nodes, send_nodes, after_send_nodes]
+
+        ok = fast_agent.fast_send(
+            {"type": "send", "target": "文件传输助手", "text": "1"},
+            [{"text": "文件传输助手", "content_desc": "", "resource_id": "", "class": "", "clickable": True}],
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(get_ui_state.call_count, 3)
 
 
 if __name__ == "__main__":

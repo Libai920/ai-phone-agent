@@ -241,6 +241,17 @@ def _looks_like_search_entry(node):
     )
 
 
+def _screen_contains_text(nodes, text):
+    if not text:
+        return True
+    lower = text.lower()
+    for n in nodes:
+        haystack = (n.get("text", "") + n.get("content_desc", "")).lower()
+        if lower in haystack:
+            return True
+    return False
+
+
 def fast_open(intent):
     """Open an app by name."""
     app = intent["app"]
@@ -328,6 +339,11 @@ def fast_send(intent, nodes):
             if st in n.get("text", "") or st in n.get("content_desc", ""):
                 execute(current_nodes, {"action": "click", "target": {"text": n.get("text", "")}})
                 time.sleep(SLEEP)
+                after_send_nodes = get_ui_state()
+                if _screen_contains_text(after_send_nodes, text):
+                    print(f"  Verified sent text on screen: {text}")
+                else:
+                    print(f"  WARNING: sent text not visible after send: {text}")
                 return True
 
     for n in current_nodes:
@@ -336,6 +352,11 @@ def fast_send(intent, nodes):
             execute(current_nodes, {"action": "click", "target": {
                 "resource_id": n.get("resource_id", "")}})
             time.sleep(SLEEP)
+            after_send_nodes = get_ui_state()
+            if _screen_contains_text(after_send_nodes, text):
+                print(f"  Verified sent text on screen: {text}")
+            else:
+                print(f"  WARNING: sent text not visible after send: {text}")
             return True
 
     return False
