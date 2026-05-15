@@ -252,6 +252,12 @@ def _screen_contains_text(nodes, text):
     return False
 
 
+def _search_text_for_target(app, target):
+    if app == "微信" and target == "文件传输助手":
+        return "wenjianchuanshuzhushou"
+    return target
+
+
 def fast_open(intent):
     """Open an app by name."""
     app = intent["app"]
@@ -292,6 +298,7 @@ def fast_send(intent, nodes):
     # Step 1: find and click the target (group/contact), if specified
     if target:
         if not _find_and_click(current_nodes, target):
+            search_text = _search_text_for_target(app, target)
             found_search = False
             for n in current_nodes:
                 if _looks_like_search_entry(n):
@@ -300,7 +307,7 @@ def fast_send(intent, nodes):
                             "text": n.get("text", ""),
                             "resource_id": n.get("resource_id", "")}})
                         time.sleep(0.5)
-                        execute(current_nodes, {"action": "input", "text": target})
+                        execute(current_nodes, {"action": "input", "text": search_text})
                         time.sleep(0.5)
                         time.sleep(SLEEP)
                         current_nodes = get_ui_state()

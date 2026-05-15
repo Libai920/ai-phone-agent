@@ -14,7 +14,7 @@ class FastSendTests(unittest.TestCase):
     @patch("fast_agent.get_ui_state")
     @patch("fast_agent.execute")
     @patch("fast_agent.launch_and_wait")
-    def test_wechat_file_transfer_uses_chinese_search_button(
+    def test_wechat_file_transfer_uses_pinyin_for_file_helper_search(
         self,
         launch_and_wait,
         execute,
@@ -79,7 +79,7 @@ class FastSendTests(unittest.TestCase):
             for call in execute.call_args_list
             if call.args[1].get("action") == "input"
         ]
-        self.assertEqual(input_texts, ["文件传输助手", "1"])
+        self.assertEqual(input_texts, ["wenjianchuanshuzhushou", "1"])
 
     @patch("fast_agent.time.sleep")
     @patch("fast_agent._find_and_click", return_value=True)
